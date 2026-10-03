@@ -1,6 +1,9 @@
 # Pocketful — stage 2
 
 Node.js HTTP service with no third-party dependencies; all state is held in memory.
+It serves the JSON API and the browser UI (`/`, `/requests`, `/split`, `/authorizations`,
+`/signup`, `/login`) from the same port. All UI assets (script, stylesheet; system fonts
+only) are inside the image, so nothing is loaded from the network at run time.
 
 ## Build and start
 
@@ -10,9 +13,9 @@ From this folder (`stage-2/`):
 docker build -t pocketful-stage-2 . && docker run --rm -e PORT=8080 -p 8080:8080 pocketful-stage-2
 ```
 
-The service listens on `0.0.0.0:$PORT` (default `8080`) and needs no network access at run
-time. `GET /health` returns `200 {"status": "ok"}` once it accepts requests (well under a
-second after start). Seed it with `POST /_test/reset`.
+The service listens on `0.0.0.0:$PORT` (default `8080`). `GET /health` returns
+`200 {"status": "ok"}` once it accepts requests (well under a second after start).
+Seed it with `POST /_test/reset`, then open http://localhost:8080/login in a browser.
 
 ## Without Docker
 
