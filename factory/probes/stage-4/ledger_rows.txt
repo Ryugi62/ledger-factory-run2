@@ -1,0 +1,154 @@
+# Source of the stage-4 ledger (same format as stages 1-3; see ../stage-1/ledger_rows.txt).
+#   == ID | section | kind | star(★ or -)
+#   > requirement quoted verbatim   ~ reading/note   ! manual reason   @ shell harness / suite
+# `python3 build_ledger.py` renders ../../ledger/stage-4.md and adds the probe column from the probes' @test(...) ids.
+
+== S4-001 | intro | behaviour | ★
+> All requirements from stages 1–3 continue to apply.
+~ "Everything earlier still holds": every row of factory/ledger/stage-1.md, stage-2.md and stage-3.md keeps applying, except where the "earlier rows changed" table says the text changed. run_all.py executes the stage-1 suite (p_*.py), the stage-2 suite (q_*.py, browser probes u_*.py unless --no-ui) and the stage-3 suite (r_*.py) as part of stage 4.
+@ run_all.py (stage-1 suite p_*.py + stage-2 suite q_*.py/u_*.py + stage-3 suite r_*.py)
+== S4-002 | intro | behaviour | -
+> Recipients can refund payments.
+== S4-003 | intro | behaviour | -
+> Settlement operators can correct several payments in one request, including payments that belong to a settlement.
+== S4-004 | intro | behaviour | ★
+> Existing receipts and saved statements must remain available in their original form.
+~ Original idempotent responses replay unchanged after refunds and batch corrections; snapshot tokens issued before still page the same frozen entries (also after export/import, S4-045).
+== S4-005 | intro | idempotency | ★
+> There are ten idempotent write paths: stage 1's five, authorizations and captures from stage 2, corrections from stage 3, and refunds and correction batches in this stage.
+~ The §7 matrix (missing/empty key, 255/256 characters, replay, changed body, failed-key reuse, user scope, same key on another path, concurrent identical requests) is probed for the two new paths.
+
+== S4-006 | refunds | idempotency | ★
+> `POST /payments/{payment_id}/refunds`, body `{"amount": 200}`, requires an idempotency key.
+~ Missing or empty key 400 missing_idempotency_key; no token 401.
+== S4-007 | refunds | error | ★
+> Only the original receiver may refund, else 403 `forbidden`; unknown payment is 404.
+~ Readings: the original sender and a third party both get exactly 403 on an existing payment; the sender of a refund payment is the original receiver and the receiver of a refund payment gets the refund-target error S4-011.
+== S4-008 | refunds | behaviour | ★
+> The target may be a direct payment, request payment or capture, but never a refund.
+~ Direct, request-paid, capture and (per S4-043) settlement-member payments are refundable.
+== S4-009 | refunds | error | ★
+> Invalid amount is 422 `validation_failed`.
+~ Reading: same rules as a payment amount (S1-112, S1-036, S1-076): integer 1..1000000000, `400.0`/`4e2` valid, 0, negatives, fractions, strings, booleans, null, arrays and a missing amount are 422. Body that is not a JSON object or does not parse is 400.
+== S4-010 | refunds | error | ★
+> Refunds cumulatively may not exceed the payment's current corrected amount: 422 `refund_exceeds_payment`.
+~ Sum of earlier refunds + this refund must be <= the payment's latest revision amount; exactly equal is accepted; after a correction the corrected amount is the cap; a payment corrected to 0 cannot be refunded; a rejected refund changes nothing and its key stays reusable.
+== S4-011 | refunds | error | ★
+> Refunds of refunds give 422 `invalid_refund_target`.
+== S4-012 | refunds | behaviour | ★
+> A refund is a new payment in the opposite direction, with `refund_of` naming the target, `request_id: null`, `authorization_id: null`, and the original note/visibility.
+~ from = the original receiver, to = the original sender, amount = the refund amount, settlement_id null, created_at = now; revision 1 effective = recorded = created_at; it appears in both parties' feeds/statements under the ordinary visibility rule (a private target gives a private refund) and in historical views from its created_at.
+== S4-013 | refunds | idempotency | -
+> Return 201 with that payment; replay returns 200 with the original body.
+== S4-014 | refunds | behaviour | ★
+> It moves existing money from the receiver's **available** funds, or fails 409 `insufficient_funds`, atomically.
+~ Held money cannot fund a refund; boundary: exactly the available amount succeeds; a failed refund leaves no trace and the key is a first use afterwards; concurrent refunds/spending never overdraw.
+== S4-015 | refunds | behaviour | ★
+> Refunds never reopen a request or authorization or restore a released hold.
+~ A refunded request-paid payment: request stays `paid` with the same payment_id; a refunded capture: authorization stays `captured` (payment_ids unchanged) and the payer's `held`/`available` are not restored.
+== S4-016 | refunds | behaviour | ★
+> Other payments have `refund_of: null`.
+~ The key `refund_of` is present (null) on every payment object: POST /payments, request pay, capture, settlement members, GET /activity, statement entries.
+== S4-017 | refunds | behaviour | -
+> Stage-3 corrections remain available for ordinary direct/request payments.
+== S4-018 | refunds | error | ★
+> Captures and refund payments cannot themselves be corrected: 422 `linked_payment_immutable`.
+~ By the payment's sender; the rejection claims no key and changes nothing.
+== S4-019 | refunds | error | ★
+> A correction cannot reduce a payment below its already-refunded amount: 422 `refund_exceeds_payment`.
+~ Reduction to exactly the refunded amount is accepted; applies to single corrections and to batch items.
+== S4-020 | refunds | error | ★
+> Correction debits are checked against available funds.
+~ A correction whose debit is covered only by held money is 409 insufficient_funds.
+
+== S4-021 | batches | error | ★
+> `POST /correction-batches` requires a settlement operator and an idempotency key, with the same 401/403 rules as settlements.
+~ No token 401; authenticated non-operator (including the sender of a payment) 403 forbidden; missing/empty key 400.
+== S4-022 | batches | limit | ★
+> corrections contains 1..32 objects with distinct payment_ids, else 422 `validation_failed`.
+~ 1 and 32 accepted; 0, 33, duplicates, a missing key `corrections` are 422; a non-array or non-object item is a malformed shape (422 as for settlements S1-190; 400 also tolerated by the probe).
+== S4-023 | batches | error | ★
+> Every item has the ordinary correction fields and validation.
+~ payment_id, expected_revision (positive integer), amount (0..1000000000), effective_at (RFC 3339 with offset, not later than now), reason (1..200 code points); each missing/invalid field is 422.
+== S4-024 | batches | error | -
+> Unknown payment is 404; a stale expected revision is 409 `stale_revision`.
+== S4-025 | batches | behaviour | ★
+> The operator may correct ordinary, request and settlement payments, but captures and refunds remain immutable.
+~ The operator need not be a party; capture/refund items give 422 linked_payment_immutable.
+== S4-026 | batches | error | ★
+> Correcting any settlement member requires including every member of that settlement, else 422 `incomplete_settlement`.
+== S4-027 | batches | error | ★
+> Members of one settlement must have identical effective instants (offset spellings may differ), else 422 `validation_failed`.
+~ The same instant written with +00:00, +02:00, fractional seconds is identical; a different instant by even one second is 422.
+== S4-028 | batches | behaviour | ★
+> Ordinary single-payment corrections remain available for nonmembers.
+~ Settlement members stay immutable for single corrections (stage 3, 422 linked_payment_immutable); only the batch endpoint may correct them.
+== S4-029 | batches | behaviour | -
+> Unknown fields are ignored.
+~ Body level and item level.
+== S4-030 | batches | error | ★
+> Error precedence is: item errors in input order, settlement completeness, resulting current available funds, then historical total and available funds at every effective/event boundary.
+~ Probed pairwise: item error (first failing item in input order, whatever its kind) > incomplete_settlement > insufficient_funds > historical_overdraft.
+== S4-031 | batches | error | -
+> The existing codes apply: `linked_payment_immutable`, `refund_exceeds_payment`, `insufficient_funds`, `historical_overdraft`.
+== S4-032 | batches | behaviour | ★
+> Affordability is determined by the combined effect of all proposed revisions.
+~ A batch whose items would each be unaffordable alone but net to an affordable position (current and historical) is accepted.
+== S4-033 | batches | behaviour | ★
+> A rejected batch leaves history, balances and idempotency records unchanged.
+~ /me, full statements, feeds and revision histories compared before/after; the key of the rejected request is a first use afterwards.
+== S4-034 | batches | behaviour | -
+> Return 201 with `correction_batch_id`, `recorded_at` and `revisions` in input order.
+~ Each element of `revisions` has the fields of a single-correction response (payment_id, revision, amount, effective_at, recorded_at, reason).
+== S4-035 | batches | time | ★
+> All new revisions share recorded_at, strictly later than the previous recorded_at of every member;
+~ All items carry the batch's recorded_at (same instant); it is later than the created_at / previous recorded_at of every member, including members that already had earlier corrections.
+== S4-036 | batches | behaviour | ★
+> each revision also exposes correction_batch_id.
+~ In the batch response, in GET /payments/{id}/revisions, and equal to the batch's id; revisions that were not made by a batch carry null or no such key.
+== S4-037 | batches | time | -
+> Effective times cannot be later than now.
+== S4-038 | batches | behaviour | ★
+> Original payments and receipts never change.
+== S4-039 | batches | idempotency | ★
+> Original payment and settlement retries return their original bodies.
+~ Replaying POST /payments, request pay, capture, POST /settlements after a batch correction (or refund) gives 200 with the original body: original amounts, original created_at/committed_at, original member list.
+== S4-040 | batches | behaviour | ★
+> New statements reflect the new revisions; earlier snapshot tokens continue to page their frozen entries.
+~ Probed with the bitemporal model (selected revision, effective_at, ordering, balances, known_at) after batches and refunds.
+== S4-041 | batches | idempotency | -
+> Replays return the original batch response with 200.
+~ Also after newer revisions of the members, and after refunds; same key + different body is 409 idempotency_key_reuse.
+== S4-042 | batches | idempotency | ★
+> This adds one idempotent write path.
+== S4-043 | batches | behaviour | ★
+> A settlement payment may be refunded under the existing refund rules, but refunds never change settlement membership.
+~ The refund payment has settlement_id null; the settlement receipt replays unchanged; a batch correcting the settlement still needs exactly the original members; reducing a refunded member below its refunded amount is refund_exceeds_payment.
+== S4-044 | batches | concurrency | ★
+> Concurrent corrections sharing any expected payment revision cannot both succeed.
+~ Batch vs batch (overlapping sets), batch vs single correction, identical-key retries; disjoint batches may all succeed; refund vs correction and refund vs refund on one payment cannot jointly exceed the cap.
+== S4-045 | batches | data-migration | ★
+> A stage-4 service must accept exports produced by the same team's stages 1–3, retaining settlement membership, corrections and snapshots.
+~ Needs running old services (PROBE_STAGE1/2/3_BASE_URL; run_docker.sh --stage1-ref/--stage2-ref/--stage3-ref builds them); SKIP otherwise. Imported settlements: membership kept (a batch must include every member; a partial batch is incomplete_settlement). Stage-3 exports: correction histories kept, snapshot tokens still page their frozen entries.
+
+== S4-046 | carried | idempotency | ★
+> Key reused after the original request failed with 4xx | Treated as a first use
+~ (S1-103 carried to refunds and batches) 422, 403-free validation, 404, 409 and linked/immutable rejections do not claim the key.
+== S4-047 | carried | idempotency | ★
+> A replay means the same user sending the **same method, the same path and the same body**. The same key with the same body on a different path is a different request, not a replay, and must succeed normally.
+~ (S1-098 carried) The same key and body on the refund path of two different payments creates two refunds.
+== S4-048 | carried | idempotency | -
+> `Idempotency-Key` | 1 to 255 characters | 422 `validation_failed`
+~ (S1-080 carried) on both new paths; absent or empty header is 400 missing_idempotency_key.
+== S4-049 | carried | data-migration | ★
+> Preserve accounts and hashed-password login, existing bearer tokens, currency, balances, payments, requests, permissions, all completed idempotent request bodies and original responses.
+~ (S1-179 carried) A stage-4 state (refunds, batches with their receipts, settlement membership, snapshots) survives export -> reset -> import: identical feeds, statements, revision histories (incl. correction_batch_id), historical views, replays 200, failed keys reusable, snapshot tokens still page the same entries.
+== S4-050 | carried | concurrency | ★
+> The sum of all wallet `total` values always equals the total seeded by the last reset.
+~ (S2-090, S3-060 carried) Refunds, batches and corrections in storms and in every historical view; no balance or available amount negative at any read.
+== S4-051 | carried | behaviour | ★
+> A refund is a new payment in the opposite direction
+~ Refund payments take part in /me?as_of&known_at, statements (delta signs, ordering, balance_after chain), historical_overdraft checks (a later correction that would leave the receiver negative at the refund's instant is refused) and opening balances stay unchanged.
+== S4-052 | carried | error | -
+> Requests must not produce 5xx responses, including under concurrent load.
+~ (S1-083 carried) any 5xx recorded by the probe client fails the probe that provoked it; every 4xx body has the standard error shape.
