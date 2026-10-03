@@ -8,3 +8,10 @@
 - Non-blocking reviewer notes: signup mid-hash during a reset lands in post-reset state; crafted imported hash with huge N could make that login 500.
 - Accepted commit: 247843dbcb916edd5aca24c2426b8d48a67aa41f (verdict 1f09d3d, factory/reviews/stage-1-r1.md).
 
+## Stage 2 report
+- Start / end (UTC): 2026-10-03 06:48 / 08:14
+- Review rounds: 2. Rejections: round 1 on 4beb1c4 (F1: literal "null" text rendered on /requests, S2-015/S2-020; cause replaceChildren with null child) -> answered by commit 2dcc6ae (all replaceChildren calls go through a null-filtering helper). Analyst added a leaked-text probe (1940007).
+- Ledger items: 173 total (plus stage-1 ledger carried forward); 166 covered by a passing probe, 7 manual; known gaps: 0.
+- Reviewer final check: clean build, --cpus 2 --memory 2g --network none, /health 200 in <2 s; harness isolated stage 2: stage 1 147/147, stage 2 35/35 (stage 3 line failed, expected; claimed stage: 2); run_docker.sh --offline --stage1-ref 247843d: phase A 144 pass / 0 fail, offline phase 115 pass / 0 fail / 2 skipped by design; own Playwright pass (available headline, JPY decimals refused, retry moves money once, no horizontal scroll at 375/1280 px, no leaked null/undefined/NaN) all correct; stage-1/ untouched.
+- Accepted commit: 2dcc6aeec66a682ce64fd8eefc606612bf8e13b1 (verdict 1c8ec08, factory/reviews/stage-2-r2.md).
+
