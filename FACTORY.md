@@ -28,7 +28,7 @@ human ──(one task message for the whole run)──▶ @coordinator
 |---|---|---|---|---|
 | coordinator | Claude Code | claude-sonnet-5-5 | dispatch, self-contained handoffs (spec pasted in numbered parts), stop rule, silence rule, stage reports in `factory/run-log.md` | write product code, accept work |
 | analyst | Claude Code | claude-sonnet-5-5 | `factory/ledger/stage-N.md`, `factory/probes/stage-N/` | open the shipped checks, write product code |
-| implementer | Claude Code | claude-opus-5-5 | `stage-N/` source, Dockerfile, RUN.md; commits cite ledger IDs | accept its own work, edit an accepted stage |
+| implementer | Claude Code | claude-opus-5-5 | `stage-N/` source, Dockerfile, RUN.md; commits cite ledger IDs (in practice 2–4 commits per stage, the first one large) | accept its own work, edit an accepted stage |
 | reviewer | Claude Code | claude-opus-5-5 | blind re-derivation, clean build, isolated checks, probes, diff reading, `factory/reviews/stage-N-rK.md` | fix code |
 
 Standing instructions: `mandates/<seat>.md`. They name no endpoint, field or error code;
@@ -39,13 +39,19 @@ single task message (first message in `room.json`).
 
 1. **Ledger before code.** The analyst quotes every normative sentence of the stage spec
    as a row with an ID, a kind and the probe that exercises it; ★ marks the rows a minimal
-   build would skip. This run: **553 rows** (208 / 173 / 120 / 52), 532 covered by a
-   passing probe, 20 manual, 1 known gap. Cost: the analyst is the slowest and most
-   expensive seat — 72 min and 53 % of the run's model spend — and it starts every stage.
+   build would skip. This run: **553 rows** (208 / 173 / 120 / 52; 315 ★), 532 covered by
+   a passing probe, 20 manual, 1 known gap (counts from the coordinator's stage reports;
+   the stage-2 ledger file itself lists 8 manual rows where the report says 7). Cost: the
+   analyst is the most expensive seat — 53 % of the run's model spend — and the slowest at
+   the start: 72 min for the stage-1 ledger.
    To hide that, the coordinator pipelines: it sends the *next* stage's ledger handoff while
-   the current stage is in review: the stage-4 ledger was ready before stage 3 closed, and stage 3 waited 8 min.
+   the current stage is in review. The stage-4 ledger was committed 15 min before stage 3
+   closed; the stage-3 ledger landed 8 min after stage 2 closed, so the implementer waited
+   8 min there. During the stage-1 ledger it waited 73 min — the price of ledger-first.
 2. **Probes are independent of the shipped checks.** The analyst never opens them, so its
-   probes are a second opinion the implementer cannot fit code to by accident. They
+   probes are a second, spec-derived opinion. The implementer does read the probes before
+   coding — they are the specification in executable form, which is the point — but the
+   reviewer re-checks with its own scripts, so passing the probes is never enough. They
    exercise retries, concurrent bursts, upgrades from the previous stage's export, an
    offline container with 2 vCPU / 2 GiB, and the UI through a headless browser.
 3. **A reviewer that does not trust the ledger.** Before opening it, the reviewer lists
@@ -68,23 +74,41 @@ human message in between.**
 
 | Stage | Window (UTC) | Rounds | Rejections → fix | Ledger rows (★) | Isolated harness, shipped checks | Accepted |
 |---|---|---|---|---|---|---|
-| 1 | 05:25–06:48 | 1 | — | 208 (93) | s1 147/147 · claimed 1 | 247843d |
-| 2 | 06:48–08:14 | 2 | F1 → 2dcc6ae | 173 | s1 147/147 · s2 35/35 · claimed 2 | 2dcc6ae |
-| 3 | 08:14–08:53 | 1 | — | 120 | + s3 6/6 · claimed 3 | cc562c1 |
-| 4 | 08:53–09:24 | 1 | — | 52 | + s4 5/5 · claimed 4 | 777b76d |
+| 1 | 05:25–06:48 | 1 | — | 208 (91) | s1 147/147 · claimed 1 | 247843d |
+| 2 | 06:48–08:14 | 2 | F1 → 2dcc6ae | 173 (92) | s1 147/147 · s2 35/35 · claimed 2 | 2dcc6ae |
+| 3 | 08:14–08:53 | 1 | — | 120 (92) | + s3 6/6 · claimed 3 | cc562c1 |
+| 4 | 08:53–09:24 | 1 | — | 52 (40) | + s4 5/5 · claimed 4 | 777b76d |
 
 `harness run --all --mode isolated` on a fresh clone: **every folder claims its own stage**
 (chain 1→4). The shipped checks are a portion of the graded suites; the probes ran in
 addition (stage 4: 202 + 173 passing probe assertions, offline and with upgrades from stages 1–3; the 2 phase-A failures were probe defects, fixed in 1837adf).
 
-**Model spend** (Band's catalog-estimated USD at list price; the seats ran on existing
-subscriptions, so the cash cost was $0): analyst $30.62 · implementer $16.84 · reviewer
-$8.82 · coordinator $1.32 · **total $57.61** for the submitted run. Rehearsals cost another
+**Model spend** (Band's catalog-estimated USD at list price, per seat for this room; the
+seats ran on existing subscriptions, so the cash cost was $0): analyst $30.62 · implementer
+$16.84 · reviewer $8.82 · coordinator $1.32 · **total $57.61** (Band's own total; the seat
+figures are rounded). Band reports spend per seat and room, not per stage; per stage, the
+time split below is the best proxy. About $14.4 per accepted stage. Rehearsals cost another
 $12.80 (toy run $8.27, aborted first run $4.53).
 
+Where the time went (UTC, from commits and room timestamps):
+
+| Stage | Ledger (analyst) | Build (implementer) | Review (reviewer) |
+|---|---|---|---|
+| 1 | 05:25–06:37 · 72 min | 06:38–06:44 · 6 min | 06:44–06:48 · 4 min |
+| 2 | 06:38–07:16 · 38 min (pipelined) | 07:17–07:46 · 29 min + fix 08:01–08:07 | r1 07:53–08:01 · r2 08:07–08:14 |
+| 3 | → 08:22 (pipelined) | 08:23–08:34 · 11 min | 08:34–08:52 · 18 min |
+| 4 | → 08:37 (ready before stage 3 closed) | 08:53–09:04 · 11 min | 09:04–09:24 · 20 min |
+
 Work split (git): implementer 14 commits / 9,030 lines, analyst 9 / 15,013 (ledgers and
-probes), reviewer 5 verdicts, coordinator 4 reports. The human made one commit before the
-run (mandates, license) and one after it (this file, README, `room.json`).
+probes), reviewer 5 verdicts, coordinator 4 reports. The human (Taegeol Kim, git author
+"Ryugi62 (human)", "Taegeol Kim" in the room) made one commit before the run (mandates,
+license) and commits after it (this file, README, `room.json`, `factory/setup/`). Nothing
+under `stage-N/` was written by the human.
+
+Genericity, measured: the same four mandates (an earlier revision — the diff since is the
+duplicate-handoff, review-commit, pipelining and silence rules) first ran the organizers'
+unrelated `toy` counter track; stages 1 and 2 were accepted there before its Codex seats
+hit their usage limit. Only the task message differed.
 
 ## How the factory caught bad work in this run
 
@@ -94,7 +118,39 @@ run (mandates, license) and one after it (this file, README, `room.json`).
 | Two stage-1 edge cases: a signup that is mid-hash during a reset lands in the new state; an imported password hash with an extreme cost could make that login fail | reviewer, diff reading (stage 1) | `stage-1-r1.md` | implementer, in stage 2 (confirmed in `stage-2-r1.md`) |
 | A probe script ignored the stage folder and failed on a correct build | reviewer | `stage-1-r1.md` | analyst 169cac5 |
 | Upgrade probes compared payments without ignoring fields later stages add | reviewer | `stage-4-r1.md` | analyst 1837adf |
-| Stage-3 exports cannot carry statement snapshots that stage 4 wants (S4-045) | analyst + reviewer | `stage-4-r1.md` | recorded as a known gap; stage 3 stays frozen |
+| Stage 3 accepted a correction `effective_at` up to 2 s in the future | reviewer, non-blocking note | `stage-3-r1.md` | implementer, in stage 4 (strict against the service clock; confirmed in `stage-4-r1.md`) |
+| Capture with an empty body returns 400 while pay treats it as `{}` | reviewer, non-blocking note | `stage-2-r1.md` | **not changed** — listed under known gaps |
+| Stage-3 exports cannot carry statement snapshots that stage 4 wants (S4-045) | analyst + reviewer | `stage-4-r1.md` | recorded as a known gap; stage 3 stays frozen — see below |
+
+Two seats addressing each other, both directions (from `room.json`):
+`07:53:04 implementer → @reviewer "REVIEW HANDOFF stage 2 (Pocketful), part 1/4 …"` ·
+`08:01:36 reviewer → @implementer @coordinator "Stage 2 round 1: REJECT …"` ·
+`08:07:01 implementer → @reviewer "REVIEW HANDOFF stage 2 round 2 …"` ·
+`08:14:17 reviewer → @implementer @coordinator "Stage 2 round 2: ACCEPT."`
+
+**S4-045 is a factory miss, not just a gap.** No stage-3 ledger row said "an export carries
+every piece of state the service holds", so nobody checked that statement snapshots were
+exported. The coordinator decided — inside the band, in its own message, with no human
+input — not to edit the accepted stage-3 folder. The hidden stage-4 suite may well test
+this. The rule we would add: the analyst writes one ledger row per stateful entity for
+export/import, and the reviewer checks exports field by field against the live state.
+
+### Audit: the one look at a shipped test
+Timeline from `room.json`: 07:42:36 a shipped stage-2 check (`/login`, `/signup` reachable
+when signed in) failed in the implementer's harness run (the failing log names the test); 07:42:39 the implementer ran
+`grep -A25 "def test_routes_are_directly_navigable" …/test_sample.py`; 07:46 commit
+`4beb1c4` "/login and /signup stay directly navigable when signed in (S2-008, S2-009,
+S2-029)". The diff (+22/−12 in `app.js`, `app.css`) makes the two routes show their form
+inside the signed-in layout instead of redirecting; it contains no fixture value, handle,
+test name or test-only branch. The rows it cites: S2-008/S2-009 — the route table lists
+`/signup` and `/login` as routes of the product — and ★S2-029 — "`current-user` | Visible
+on every screen when signed in". A search of all 1,555 room messages finds no other tool
+call that opened a shipped test file; the analyst never did. It should have gone to the
+analyst as a probe gap; we disclose it rather than hide it.
+
+The reviewer, too, worked partly outside the repository: in stage 4 it patched two probe
+comparison helpers in a scratch copy (`review-tmp/`) to confirm the failures were probe
+defects before the analyst fixed them in the repository (1837adf).
 
 ## What we tried that failed
 
@@ -121,7 +177,7 @@ run (mandates, license) and one after it (this file, README, `room.json`).
 ## Stand it up yourself
 
 1. Band Desktop 0.4.12+, signed in; a Docker daemon; Python 3.12 for the event harness;
-   Claude Code signed in.
+   Claude Code signed in. Identity used here: Band handle `xorjf1027`.
 2. Create the seats — `factory/setup/create-seats.sh` (one `band agent create` per seat,
    instructions linked live to `mandates/<seat>.md`, `--claude-permission-mode
    bypassPermissions` so no seat waits for an approval).
@@ -133,10 +189,27 @@ run (mandates, license) and one after it (this file, README, `room.json`).
 
 Point the same mandates at another problem by changing only that one message.
 
+## Code map (stage-4, for a maintainer)
+
+`stage-4/src/server.js` (1,748 lines, Node.js standard library only) is one module in
+sections: errors (26) · helpers: microsecond clock, RFC 3339, canonical JSON, field rules
+(41) · passwords, scrypt (181) · state and payment revision history (222–416) · bitemporal
+history: balances as of / known at, holds, overdraft checks, statements (417–524) · reset
+fixture validation (525) · export / import across stages 1–4 (687) · HTTP plumbing and the
+idempotent-write wrapper (907–1039) · operations: payments, requests, splits,
+settlements, authorizations (1040) · history endpoints (1321) · corrections, refunds,
+batches (1411–1550) · auth (1551) · routing and HTML/JSON negotiation (1608). Every write
+runs synchronously on the event loop, which is the whole concurrency story. The UI is
+`src/public/app.js` (814 lines) + `app.css` (229, design tokens), unchanged since stage 2:
+pocketful stages 3 and 4 specify API behaviour only. The regression suite is
+`factory/probes/stage-1..4/`; there are no unit tests inside the stage folders.
+
 ## Limitations
 
-- Green shipped checks are not proof: the hidden suites decide. The ledger and probes are
-  our best attempt at them, and one known gap (S4-045) is open.
+- Green shipped checks are not proof: stages 3 and 4 ship 6 and 5 checks. The ledger and
+  probes are our best attempt at the rest. Known gaps: S4-045 (stage-3 snapshot export) and
+  empty-body capture returning 400.
+- One file per service: fast for the band, harder for a human maintainer (see code map).
 - The ledger is two readings of the spec (analyst, then the reviewer's blind sample). A
   sentence both misread would pass.
 - Implementer and reviewer run the same model after the provider fallback.

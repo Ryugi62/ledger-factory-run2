@@ -19,8 +19,10 @@ and reject any build that cannot show evidence for it.
 The submitted run took **3 h 59 min** from one dispatch to the coordinator's final report,
 with a model spend of **$57.61** (Band's list-price estimate; $0 cash — existing
 subscriptions). The shipped checks are only part of the graded suites; see `FACTORY.md` for
-the 553-row requirement ledger and probes the band built to cover the rest, and for the one
-known gap.
+the 553-row requirement ledger and probes the band built to cover the rest. Known gaps we
+expect the hidden suites may find: S4-045 (statement snapshots issued by the stage-3 service
+are not carried through its export) and capture with an empty body (400 instead of `{}`).
+Stages 3 and 4 of pocketful specify API behaviour only, so the UI is the stage-2 UI.
 
 One human message started the submitted run (`room.json`, first message). Nothing was sent
 to the room after it.
@@ -42,11 +44,14 @@ to the room after it.
 ## Run a stage
 
 ```sh
-cd stage-2 && docker build -t pocketful-stage-2 . && docker run --rm -e PORT=8080 -p 8080:8080 pocketful-stage-2
-# open http://localhost:8080/signup
+cd stage-4 && docker build -t pocketful-stage-4 . && docker run --rm -e PORT=8080 -p 8080:8080 pocketful-stage-4
+# open http://localhost:8080/signup to create an account (new accounts start at 0),
+# or seed users with POST /_test/reset (see stage-1 spec fixture) and open /login
 ```
 
-Every commit under `stage-N/` was made by a seat in the room. The human commits are the
-mandates, this README, `FACTORY.md`, `room.json` and the license.
+Every commit under `stage-N/` was made by a seat in the room (git authors `analyst`,
+`implementer`, `reviewer`, `coordinator`). The human — Taegeol Kim, git author
+"Ryugi62 (human)" — committed the mandates and license before the run, and this README,
+`FACTORY.md`, `room.json` and `factory/setup/` after it.
 
 License: MIT.
