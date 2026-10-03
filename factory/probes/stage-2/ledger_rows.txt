@@ -1,0 +1,460 @@
+# Source of the stage-2 ledger (same format as stage 1; see ../stage-1/ledger_rows.txt).
+#   == ID | section | kind | star
+#   > requirement quoted verbatim   ~ reading/note   ! manual reason   @ shell harness / suite
+# `python3 build_ledger.py` renders ../../ledger/stage-2.md.
+
+== S2-001 | intro | behaviour | ★
+> The stage-1 requirements continue to apply, with the additions below.
+~ run_all.py runs the whole stage-1 probe suite (p_*.py in ../stage-1) as part of stage 2; see the "earlier rows changed" table in the ledger.
+@ run_all.py (stage-1 suite p_*.py)
+== S2-002 | intro | behaviour | -
+> Numbered section references such as §5 and §7 refer to `stage-1.md`.
+! informational
+== S2-003 | intro | behaviour | ★
+> everything earlier still holds
+~ Row required by the handoff: every stage-1 row in factory/ledger/stage-1.md still holds unless the "earlier rows changed" table says otherwise. The stage-1 probes are executed unchanged (except two matrix hooks) by the stage-2 runner.
+@ run_all.py (stage-1 suite p_*.py)
+== S2-004 | intro | UI-state | -
+> Users can manage payments, requests and bill splits in a browser. They can also reserve money for a recipient to collect later, in one or more captures.
+~ Covered by the screen probes below.
+@ run_all.py (ui probes u_*.py)
+== S2-005 | routes | UI-state | -
+> `/` | Balance, pay form, request form and the activity feed
+~ Reachable by URL with a full page load after sign-in; every testid listed for the screen is present.
+== S2-006 | routes | UI-state | -
+> `/requests` | Incoming and outgoing requests, with pay, decline and cancel
+== S2-007 | routes | UI-state | -
+> `/split` | Split form
+== S2-008 | routes | UI-state | -
+> `/signup` | Signup
+== S2-009 | routes | UI-state | -
+> `/login` | Login
+== S2-010 | routes | UI-state | ★
+> The following screens must be reachable by URL. Other screens must be reachable through the UI.
+~ `/authorizations` (stage 2) and the other routes are linked from the navigation of every signed-in screen (clicked, not just present).
+== S2-011 | routes | behaviour | -
+> Server-side and client-side rendering are both permitted.
+! permissive statement; probes wait for elements instead of assuming either
+== S2-012 | routes | behaviour | ★
+> The browser and the API share `/requests`. Return the UI for `Accept: text/html`; API requests without that header receive JSON.
+~ Reading: a navigation with Accept text/html (no Authorization header possible) gets 200 HTML, never 401; any request without text/html in Accept (none, application/json, */*) gets JSON, 401 without token. Same for /authorizations (S2-152).
+== S2-013 | routes | UI-state | -
+> The UI must expose the `data-testid` attributes listed below for integration testing.
+~ Every table row below has its own row; this row is covered by their probes.
+@ ui probes u_*.py (each testid row)
+== S2-014 | routes | behaviour | -
+> Additional elements are permitted, and the visual implementation is the team's choice subject to the product-quality requirements below.
+! permissive statement
+== S2-015 | quality | UI-state | -
+> The browser experience must feel like a coherent, presentation-ready consumer finance product, not a test harness with controls attached. Aim for a calm, trustworthy character.
+~ Subjective. Probes check objective proxies only (document title, viewport meta, no console errors, no default serif body font, no external requests) and save screenshots at 375 and 1280 px for a human or model reviewer (--screenshots DIR).
+== S2-016 | quality | UI-state | ★
+> Available funds must be the clearest monetary value once holds exist, with total and held funds visibly secondary.
+~ Computed font-size of wallet-available is strictly larger than wallet-balance and wallet-held, and its weight is not lighter.
+== S2-017 | quality | UI-state | -
+> Payments, requests, splits and authorisations should be easy to scan, and status, direction, privacy and money movement should be understandable without interpreting raw API data.
+~ Proxy: each request/authorization item shows a human status word; feed items show privacy and direction in words or symbols with accessible text; no raw JSON or technical ids in visible text.
+== S2-018 | quality | UI-state | -
+> Use a consistent visual system for typography, spacing, colour, controls and feedback. Primary actions must be easy to identify.
+~ Proxy: one font family across routes; primary submit buttons are filled (non-transparent background) and differ from the secondary decline/cancel/void buttons.
+== S2-019 | quality | UI-state | ★
+> Available, held, pending, loading, successful, refused and uncertain states must be visually distinct as well as satisfying the behavioural requirements below.
+~ Proxy: computed colour/background/border/opacity signatures differ between request statuses (pending/paid/declined/cancelled), authorization statuses (open/captured/voided/expired), wallet-available vs wallet-held, and pay-error vs pay-uncertain; a loading indicator is visible while data is slow.
+== S2-020 | quality | UI-state | ★
+> Format people, amounts and timestamps for people first; expose technical identifiers only where they help the user.
+~ Proxy: no ISO-8601 timestamps, `p_…`/`u_…`/`rq_…` ids or JSON in feed/request/authorization item text (authorization-expires is explicitly RFC 3339 and exempt).
+== S2-021 | quality | UI-state | ★
+> The required flows must remain clear and usable at a 375 CSS-pixel viewport and at conventional desktop widths, without horizontal page scrolling.
+~ At 375, 768 and 1280 px, on every route, with long notes/names/handles present: document scrollWidth <= viewport width and every testid control lies inside the viewport horizontally.
+== S2-022 | quality | UI-state | ★
+> Inputs need visible labels, keyboard focus must be apparent, and text and controls need sufficient contrast.
+~ Proxy: every visible input/select has a programmatically associated visible label (placeholder alone is not enough); focusing by Tab changes outline/box-shadow/border/background; WCAG contrast >= 4.5 (3 for large text) for text over solid backgrounds.
+== S2-023 | quality | UI-state | ★
+> Provide considered empty, loading and error states, and keep navigation consistent across the required routes.
+~ Empty states have testids (S2-048, S2-056, S2-163); loading: indicator while requests are delayed; error: visible message when a data request fails; navigation: same link set on every signed-in route.
+== S2-024 | quality | UI-state | -
+> A custom illustration, brand asset or exact visual match to a reference is not required.
+! permissive statement
+== S2-025 | auth-ui | UI-state | -
+> `signup-email`, `signup-password`, `signup-display-name` | Inputs
+~ Signup through the form creates a working account (API login with the same credentials works), signs the browser in and shows current-user.
+== S2-026 | auth-ui | UI-state | -
+> `signup-submit` | Button
+== S2-027 | auth-ui | UI-state | -
+> `login-email`, `login-password`, `login-submit` | Inputs and button
+~ Login through the form signs the browser in.
+== S2-028 | auth-ui | UI-state | ★
+> `auth-error` | Error message. Present only when there is one
+~ Absent on a fresh /login and /signup; present with non-empty text after wrong password, duplicate email, short password, taken handle; gone again after a later success.
+== S2-029 | auth-ui | UI-state | ★
+> `current-user` | Visible on every screen when signed in. Text contains the display name
+~ Checked after a full navigation to /, /requests, /split and /authorizations.
+== S2-030 | auth-ui | UI-state | -
+> `current-handle` | Text is exactly the caller's handle, with no `@` and no surrounding words
+== S2-031 | auth-ui | UI-state | -
+> `logout-button` | Button
+~ After logout current-user is gone and / no longer shows the wallet (login or redirect).
+== S2-032 | pay-ui | UI-state | -
+> `wallet-balance` | Text is exactly the formatted amount. Carries `data-amount="{minor units}"`
+~ Stage 2 redefines it as the formatted `total` (S2-147). Exact text incl. no digit grouping and no float rounding (a 9.0e15 balance is probed).
+== S2-033 | pay-ui | UI-state | -
+> `pay-handle`, `pay-amount`, `pay-note` | Inputs. `pay-amount` is a **decimal** string as a person would type it, e.g. `15.00`
+== S2-034 | pay-ui | UI-state | -
+> `pay-visibility` | Selects `public` or `private`. Option values are those two strings
+== S2-035 | pay-ui | UI-state | -
+> `pay-submit` | Button
+== S2-036 | pay-ui | UI-state | -
+> `pay-error` | Error message, when the payment is refused — including insufficient funds
+~ Refusal kinds probed: insufficient funds, unknown handle, own handle, zero amount; pay-error is absent after a success and on a fresh page.
+== S2-037 | pay-ui | UI-state | -
+> `request-handle`, `request-amount`, `request-note`, `request-submit` | The request form
+== S2-038 | pay-ui | UI-state | -
+> `request-error` | Error message, when the request is refused
+== S2-039 | pay-ui | UI-state | ★
+> Keep the pay form's values after success. Submitting it again without changing a field must not send another payment: `wallet-balance` falls once, the feed contains one payment and `pay-error` is absent.
+~ Any repeat POST /payments the UI does send must carry the same Idempotency-Key and body (§7 replay) — then the server answers 200 and nothing moves twice.
+== S2-040 | pay-ui | UI-state | ★
+> Changing a field makes the next submission a new payment request.
+~ Observable: a different Idempotency-Key, and a second payment appears (balance falls twice). Probed for each of handle, amount, note, visibility.
+== S2-041 | pay-ui | idempotency | ★
+> Retries follow §7.
+~ Same key and same body on retry (verified from the recorded request headers).
+== S2-042 | pay-ui | UI-state | ★
+> **Formatted amount.** `wallet-balance` is the decimal with exactly `minor_units` decimal places, a single space, then the currency code: `100.00 EUR`. For a `minor_units` of `0` there is no decimal point at all: `1200 JPY`.
+~ Probed for EUR(2), JPY(0), BHD(3): `100.00 EUR`, `1200 JPY`, `12.345 BHD`, `0.00 EUR`, `0 JPY`, `1234567.89 EUR`.
+== S2-043 | pay-ui | UI-state | -
+> Balances are never negative, so there is no sign.
+== S2-044 | pay-ui | UI-state | ★
+> The form accepts decimal amounts and submits minor units to the API. With `minor_units: 2`, `15.00` and `15` both submit `1500`; `15.5` submits `1550`.
+~ Verified on the wire (recorded POST /payments body). Also `15.0`, `0.05`; JPY `15` -> 15; BHD `1.234` -> 1234.
+== S2-045 | pay-ui | UI-state | ★
+> Nonnumeric input or more than `minor_units` decimal places must show the form's error element without sending a request. For example, `15.005` is rejected rather than rounded.
+~ No POST at all (recorded) and pay-error visible. Inputs: `15.005`, `abc`, empty, `1.2.3`, `1e2`, `-5`; JPY `15.5`; BHD `1.2345`. Same for request-/split-/authorize- forms.
+== S2-046 | feed-ui | UI-state | ★
+> `activity-list` | Container. Its children are newest first in the DOM
+~ Payments created in different seconds; the DOM order equals the API order.
+== S2-047 | feed-ui | UI-state | ★
+> `activity-item-{payment_id}` | One per visible payment. Carries `data-visibility="public"` or `data-visibility="private"`
+~ The set of items equals GET /activity exactly: private payments of others are absent; the caller's own private ones are present with data-visibility private.
+== S2-048 | feed-ui | UI-state | -
+> `activity-parties-{payment_id}` | Text contains both handles
+== S2-049 | feed-ui | UI-state | -
+> `activity-amount-{payment_id}` | Text is exactly the formatted amount
+== S2-050 | feed-ui | UI-state | ★
+> `activity-note-{payment_id}` | Text is exactly the note. Present even when the note is empty
+~ textContent equality for notes with spaces, markup, `&`, emoji; markup is shown literally (no HTML injection: an `<img onerror>` note must not execute).
+== S2-051 | feed-ui | UI-state | ★
+> `empty-activity` | Shown instead of the list when nothing is visible
+~ Shown for a user with no visible payment, absent once an item exists.
+== S2-052 | feed-ui | UI-state | -
+> Two payments with equal timestamps may appear in either order.
+! permissive statement
+== S2-053 | requests-ui | UI-state | -
+> `incoming-list`, `outgoing-list` | Containers
+== S2-054 | requests-ui | UI-state | ★
+> `request-item-{request_id}` | One per request. Carries `data-status="{status}"`
+~ All four statuses are listed (paid/declined/cancelled items stay visible); incoming ones (caller is payer) inside incoming-list, outgoing ones inside outgoing-list.
+== S2-055 | requests-ui | UI-state | -
+> `request-amount-{request_id}` | Text is exactly the formatted amount
+== S2-056 | requests-ui | UI-state | ★
+> `request-pay-{request_id}` | Button. Present only on a `pending` incoming request
+== S2-057 | requests-ui | UI-state | ★
+> `request-decline-{request_id}` | Button. Present only on a `pending` incoming request
+== S2-058 | requests-ui | UI-state | ★
+> `request-cancel-{request_id}` | Button. Present only on a `pending` outgoing request
+== S2-059 | requests-ui | UI-state | -
+> `request-error` | Shown when a pay, decline or cancel is refused
+== S2-060 | requests-ui | UI-state | -
+> `empty-requests` | Shown when both lists are empty
+== S2-061 | split-ui | UI-state | -
+> `split-amount` | Decimal input, same rule as `pay-amount`
+== S2-062 | split-ui | UI-state | -
+> `split-handles` | Text input: handles separated by commas, in order
+== S2-063 | split-ui | UI-state | -
+> `split-note`, `split-submit` | Input and button
+== S2-064 | split-ui | UI-state | ★
+> `split-preview` | Shows the computed shares before submitting. Contains one `split-share-{handle}` per participant
+~ Preview appears and updates while typing, with no POST /splits sent; participants are exactly the listed handles (the caller may or may not be listed).
+== S2-065 | split-ui | UI-state | -
+> `split-share-{handle}` | Text is exactly the formatted share amount
+~ e.g. 10.00 among ada,bob,cy -> `3.34 EUR`, `3.33 EUR`, `3.33 EUR`; JPY `4 JPY`; zero shares `0.00 EUR`.
+== S2-066 | split-ui | UI-state | -
+> `split-error` | Error message, when the split is refused
+~ Unknown handle, duplicate handle, empty handle list, bad decimal amount.
+== S2-067 | split-ui | UI-state | ★
+> `split-preview` must show the shares the server would compute, by the rule in `stage-1.md` §9, before anything is posted. The preview and submitted split must have identical shares.
+~ Property check over many (amount, participants, order) combinations in EUR/JPY/BHD; after submit the created requests carry the previewed amounts.
+== S2-068 | refresh | UI-state | ★
+> After any successful action, the balance, the feed and the request lists on the same page must show the new state without a manual reload.
+~ Probed for pay, request, authorize on `/`; pay/decline/cancel on `/requests`; capture/void on `/authorizations`.
+== S2-069 | refresh | UI-state | ★
+> Navigation must wait for the write to succeed before it refreshes the data.
+~ Proxy: while a write is held in flight no optimistic state appears (balance/feed/status unchanged until the response); a refused write (stubbed 409) leaves data and inputs unchanged.
+== S2-070 | refresh | behaviour | -
+> **There is no live-update requirement here** — another client may change state, but this browser need only refresh after its own action or an explicit refresh.
+! permissive statement
+== S2-071 | races | UI-state | ★
+> Add `wallet-refresh`, a button on `/` that refreshes the balance and feed without clearing the pay form.
+~ Other client pays the user; click wallet-refresh; balance and feed update; every pay-form value is untouched.
+== S2-072 | races | UI-state | ★
+> **Latest refresh wins:** a delayed earlier read must not overwrite a later refresh, including when responses arrive out of order.
+~ Click 1's data responses are held back while click 2 completes with newer data; after the stale responses are released the UI must still show the newer data (never reverting).
+== S2-073 | races | UI-state | ★
+> Another client may spend the balance after this browser reads it. A refused payment shows `pay-error`, refreshes the balance/feed, and preserves all pay inputs.
+== S2-074 | races | UI-state | ★
+> A request cancelled elsewhere while its pay button is visible must show `request-error` when payment is refused and refresh the request list so the stale pay button disappears.
+== S2-075 | races | UI-state | ★
+> If a payment response is lost, including after `POST /payments` commits, show `pay-uncertain` (nonempty text), not `pay-error`.
+~ Both variants: response dropped after the server committed (route.fetch then abort) and request dropped before reaching the server.
+== S2-076 | races | idempotency | ★
+> Keep the unchanged form retryable with the **same key and body**. Successful retry removes both error/uncertainty elements, refreshes the balance and feed, and moves money exactly once.
+== S2-077 | races | UI-state | ★
+> Unknown outcomes are not confirmed rejections.
+~ While uncertain: no pay-error, form values kept, and the retry (not a new payment) is what the unchanged submit does.
+== S2-078 | races | behaviour | -
+> No background polling, live synchronization, or recovery across page reloads is required.
+! permissive statement
+== S2-079 | races | UI-state | ★
+> The same balance refresh rules apply to the available and held amounts introduced below.
+~ wallet-refresh updates wallet-available/wallet-held too, and latest-refresh-wins applies to them.
+== S2-080 | upgrade | data-migration | ★
+> A stage-2 service must accept an export produced by the same team's stage-1 service.
+~ Needs a running stage-1 service: PROBE_STAGE1_BASE_URL (run_docker.sh --stage1-ref <git-ref> builds and starts one). SKIP otherwise. The rich stage-1 state is exported there, imported here, and the full stage-1 round-trip verification plus stage-2 fields are checked.
+== S2-081 | upgrade | data-migration | ★
+> A browser signed in before that export/import upgrade must remain signed in afterwards.
+~ Reading: browser signs in through the stage-2 UI, an export is taken and imported (after a reset to a different fixture) between two browser actions; the browser is still signed in and acts without logging in again. Tokens of imported stage-1 users are valid on the stage-2 API.
+== S2-082 | upgrade | data-migration | ★
+> Existing pending requests remain payable through the request screen.
+== S2-083 | upgrade | data-migration | ★
+> A payment whose response was lost before export remains retryable after import with the same body and key; the UI must recover the original payment and refresh the imported balance.
+~ Variants: payment committed (response lost) and payment never reached the server; money moves exactly once either way.
+== S2-084 | upgrade | data-migration | -
+> These requirements apply when import completes between browser requests; migration during an in-flight request is not required.
+! permissive statement
+== S2-085 | upgrade | data-migration | ★
+> No page reload or new screen is required. The form and pending retry identity must survive the upgrade.
+~ The pay form values are still there after import, and the retry sends the original key.
+== S2-086 | auth | behaviour | -
+> A payment may be **authorised** now and **captured** later, for the full amount or less.
+== S2-087 | auth | behaviour | -
+> An authorisation places a *hold* on the payer's wallet: it reserves money without moving it.
+~ After POST /authorizations: payer total unchanged, available down by the amount, held up; receiver untouched; no payment, no feed item.
+== S2-088 | auth | behaviour | -
+> Capturing moves the money; a final capture also releases whatever was not captured. Nonfinal captures keep the remainder held.
+== S2-089 | auth | time | ★
+> An open authorisation expires and releases its remainder on its own.
+~ TTL 2 s fixture: after the deadline, with no request in between, /me, /authorizations and payments reflect the release.
+== S2-090 | invariants | concurrency | ★
+> The sum of all wallet `total` values always equals the total seeded by the last reset. A hold moves no money; payments, settlements and captures transfer money between wallets.
+~ Changes S1-005 (sum of balances) to sum of totals; probed after storms of payments, authorizations, captures, voids, settlements.
+== S2-091 | invariants | concurrency | ★
+> `available = total − held` must never be negative. Held funds cannot fund new payments, authorizations or settlement net debits. Captures may spend the money reserved for them.
+~ Changes S1-006. A sampler reads /me during storms: each read must satisfy balance == total, available == total − held, 0 <= held <= total.
+== S2-092 | invariants | concurrency | ★
+> Cumulative captures must not exceed the authorized amount. Each idempotent capture moves money once. A closed hold cannot be captured again.
+== S2-093 | api-me | behaviour | -
+> `GET /me` keeps `balance`, and `balance` **equals `total`**. `available` and `held` are new fields beside it.
+~ Changes S1-108.
+== S2-094 | api-me | behaviour | -
+> With no open holds, `balance`, `total` and `available` agree and `held` is zero, and every earlier behaviour is unchanged.
+== S2-095 | api-pay | behaviour | ★
+> `POST /payments` remains an immediate transfer. It must not leave an intermediate hold or require a separate capture.
+~ After a payment the sender's held is unchanged and /authorizations lists nothing new.
+== S2-096 | api-pay | error | ★
+> Every `409 insufficient_funds` in stage 1 — on `POST /payments`, `POST /requests/{id}/pay` and settlements — is now evaluated against `available`.
+~ Changes S1-111, S1-130, S1-196, S1-195. Payment, request pay and settlement each fail when only held money would cover them and succeed with exactly `available`; with no holds nothing changes.
+== S2-097 | api-pay | behaviour | -
+> Paying a request remains immediate. Authorizing a request is out of scope.
+== S2-098 | api-pay | behaviour | -
+> `POST /splits` is unchanged.
+== S2-099 | api-pay | idempotency | ★
+> There are now seven idempotent write paths: stage 1's five, authorizations and captures. The same replay rules apply independently to each.
+~ Changes S1-096, S1-203. The nine stage-1 matrix checks (missing key, replay, conflict, failed-key reuse, user scope, key length, concurrent identical, replay after change, different-path) run over both new paths too.
+== S2-100 | model | behaviour | ★
+> `authorization_ttl_seconds` applies to every authorisation created through the API. It defaults to 600 when omitted.
+~ Changes S1-066 (fixture keys). Reset replaces it; omitted means 600.
+== S2-101 | model | error | ★
+> If supplied, it must be a positive integer number of seconds.
+~ Reading: 0, negative, fractional, string, boolean, null are reset errors (422 validation_failed, state unchanged). Integral-valued JSON numbers (`60.0`) follow §4's integral rule and are accepted.
+== S2-102 | model | behaviour | -
+> Seeded authorisations carry their own absolute `expires_at` instead.
+~ Seeded open authorisation with future expires_at holds funds until then; expires_at is not recomputed from the TTL.
+== S2-103 | model | behaviour | ★
+> A user's seeded `balance` is still `total`. **`available` is derived, never seeded** — the service subtracts the seeded open holds itself.
+== S2-104 | model | error | ★
+> A sum of seeded unexpired open holds larger than that user's `balance` is a reset error: `422 validation_failed` from `POST /_test/reset`, changing nothing, exactly like a negative seeded balance.
+~ Changes S1-062. Sum of several holds counted; equal to balance is fine; expired/captured/voided ones are not counted; prior state intact after the 422.
+== S2-105 | model | behaviour | ★
+> Seeded `status` is `open`, `captured`, `voided` or `expired`. Only `open` holds anything.
+== S2-106 | model | behaviour | -
+> An earlier fixture may omit `authorizations` altogether; omission means an empty list.
+== S2-107 | model | time | ★
+> An authorization whose `expires_at` is at or before now is `expired` and holds no funds.
+~ A seeded `open` authorization with a past expires_at is reported `expired` and holds nothing even if larger than the balance.
+== S2-108 | model | time | ★
+> Reads and writes must reflect expiry even if no request occurred at the deadline.
+== S2-109 | model | time | ★
+> `GET /authorizations` must show `status: "expired"`, and `GET /me` must include the released remainder in `available`.
+== S2-110 | model | time | -
+> Seeded expiry times are at least an hour from reset time, in the past or future; newly created authorizations may have shorter lifetimes.
+== S2-111 | api-me | behaviour | -
+> { "user_id": "u_ada", "display_name": "Ada", "handle": "ada", "balance": 10000, "total": 10000, "available": 8000, "held": 2000, "currency": "EUR", "minor_units": 2 }
+~ All fields present with integer types; values consistent.
+== S2-112 | api-me | behaviour | ★
+> `balance` and `total` are always equal. `held` is the sum of open holds, and `available` is `total − held`, never negative.
+~ Multiple open holds sum; closed/expired ones do not count; every /me read during a storm is internally consistent.
+== S2-113 | api-auth | idempotency | -
+> `Idempotency-Key` is required. The caller is the payer.
+~ POST /authorizations: missing/empty key -> 400; the caller's own wallet is held.
+== S2-114 | api-auth | behaviour | -
+> `note` and `visibility` are optional with the same defaults as `POST /payments`.
+== S2-115 | api-auth | behaviour | -
+> "authorization_id": "a_4", "from_user_id": "u_ada", "from_handle": "ada", "to_user_id": "u_bob", "to_handle": "bob", "amount": 2000, "captured_amount": 0, "currency": "EUR", "note": "deposit", "visibility": "private", "status": "open", "expires_at": "2026-09-24T13:20:00+00:00", "payment_id": null, "created_at": "2026-09-24T13:10:00+00:00"
+~ 201 body with all those fields and values (+ remaining_amount, payment_ids per S2-128/S2-127; payment_ids is [] before any capture).
+== S2-116 | api-auth | time | ★
+> `expires_at` is `created_at` plus `authorization_ttl_seconds`.
+~ Exact difference equals the fixture TTL (600 default, 60, 7200).
+== S2-117 | api-auth | error | ★
+> The caller's `available` is below `amount` | 409 `insufficient_funds`
+~ Boundary: amount == available succeeds; held funds are not spendable; total alone is not the test.
+== S2-118 | api-auth | error | -
+> `amount` below 1, above 1000000000, or not an integer | 422 `validation_failed`
+~ Same value set and numeric forms as S1-112/S1-036.
+== S2-119 | api-auth | error | ★
+> `to_handle` is the caller's own handle | 422 `self_payment`
+~ Decided before the funds check (like S1-113).
+== S2-120 | api-auth | error | -
+> `note` over 200 characters, or `visibility` neither `public` nor `private` | 422 `validation_failed`
+== S2-121 | api-auth | error | -
+> No user has that handle | 404 `not_found`
+== S2-122 | api-auth | behaviour | ★
+> An open authorisation is **not** a feed item and never appears in `GET /activity`.
+== S2-123 | api-capture | idempotency | -
+> `Idempotency-Key` is required. Only the receiver (the `to` party) may capture.
+== S2-124 | api-capture | behaviour | -
+> `amount` is optional and defaults to the authorisation's remaining amount.
+== S2-125 | api-capture | idempotency | ★
+> As on `POST /requests/{id}/pay`, **a replay must send the identical body** — `{}` and `{"amount": 2000}` are different JSON values even when they mean the same capture, so reusing a key across the two is 409 `idempotency_key_reuse` per `stage-1.md` §7.
+== S2-126 | api-capture | behaviour | -
+> Returns `201` with the created **payment**, in exactly the shape `POST /payments` returns, with `authorization_id` set to this authorisation and `request_id: null`. The payment's `amount` is the captured amount; its `note` and `visibility` are copied from the authorisation; it appears in the activity feed by the ordinary visibility rule.
+~ Payment goes payer -> receiver; private capture payments are visible only to the two parties.
+== S2-127 | api-capture | behaviour | ★
+> Payments created without an authorisation carry `authorization_id: null`; their existing `request_id` semantics are unchanged.
+~ Changes S1-110/S1-199: direct, request-paid, settlement and seeded payments all expose `authorization_id: null` (key present).
+== S2-128 | api-capture | behaviour | -
+> By default the authorisation becomes `captured`, carries `captured_amount` and `payment_id`, and **releases the uncaptured remainder immediately**: capturing 1500 of 2000 returns 500 to the payer's `available` in the same step.
+== S2-129 | api-capture | error | ★
+> **Default: one final capture per authorisation.** A second capture after a final capture is `409 authorization_not_open`.
+== S2-130 | api-capture | behaviour | ★
+> To keep the remainder held, send `{"amount": 700, "final": false}`. `final` is boolean, default `true`, so earlier single-capture requests retain their behavior.
+== S2-131 | api-capture | behaviour | ★
+> With `final: false` and an uncaptured remainder, status stays `open`; further captures are allowed up to that remainder. Capturing the entire remainder closes it even with `final: false`.
+== S2-132 | api-capture | behaviour | ★
+> A final capture closes it and releases any remainder.
+~ Explicit `final: true` after non-final captures releases only what is left.
+== S2-133 | api-capture | error | ★
+> `capture_exceeds_authorization` compares with the **remaining** amount; omitted amount defaults to that remainder.
+== S2-134 | api-capture | behaviour | ★
+> `captured_amount` is cumulative; `payment_id` is the latest capture; `payment_ids` lists every capture in order.
+== S2-135 | api-capture | behaviour | -
+> Every authorization response adds `remaining_amount`: the amount still held, zero when closed.
+~ On POST /authorizations, void, and every item of GET /authorizations (open, captured, voided, expired).
+== S2-136 | api-capture | behaviour | ★
+> Void and expiry can close a partially captured authorization, release only the remainder, and preserve all capture records.
+== S2-137 | api-capture | idempotency | ★
+> New fields do not change idempotency body equality.
+~ Reading: body equality stays "same JSON value" (§7): `{"amount": 700}` vs `{"amount": 700, "final": false}` vs `{"amount": 700, "final": true}` are three different bodies (409 across them); an identical replay is 200.
+== S2-138 | api-capture | error | ★
+> The authorisation is not `open` | 409 `authorization_not_open`
+~ After a final capture, after void; for a captured one even if its expires_at has passed.
+== S2-139 | api-capture | error | ★
+> `expires_at` is at or before now | 409 `authorization_expired`
+~ Reading: capture of an authorization that expired by the clock answers `authorization_expired` (the only way that row is reachable); a seeded status `expired` accepts either code.
+== S2-140 | api-capture | error | ★
+> `amount` above the authorisation's uncaptured remainder | 422 `capture_exceeds_authorization`
+== S2-141 | api-capture | error | -
+> `amount` below 1, or not an integer | 422 `validation_failed`
+~ 0, -1, 1.5, "100", true, null, [] ; a non-boolean `final` is a wrong JSON type: 400 malformed_request (reading of §5).
+== S2-142 | api-capture | error | ★
+> The caller is not the receiver | 403 `forbidden`
+~ The payer and strangers both get 403.
+== S2-143 | api-capture | error | -
+> Unknown authorisation | 404 `not_found`
+== S2-144 | api-void | behaviour | -
+> **Only the payer may void** — the `from` party releasing their own hold. No idempotency key, like decline and cancel.
+~ Works with no Idempotency-Key header and no body.
+== S2-145 | api-void | behaviour | -
+> `200` with the authorisation, `status: "voided"`, the hold released.
+== S2-146 | api-void | behaviour | -
+> Voiding an already-voided authorisation is `200` with the current state.
+== S2-147 | api-void | error | -
+> A `captured` or `expired` one is `409 authorization_not_open`.
+== S2-148 | api-void | error | ★
+> For an existing authorization, capture and void return 403 `forbidden` when the caller is not the permitted party, including callers who are neither party.
+~ Unlike S1-072 (requests), strangers must get exactly 403 here.
+== S2-149 | api-list | behaviour | -
+> `GET /authorizations` returns only authorizations involving the caller.
+== S2-150 | api-list | behaviour | -
+> Authorisations where the caller is the payer or the receiver, and no others. Newest first by `created_at`.
+~ Reading: like GET /requests (S1-141) strict reverse creation order; envelope `{"authorizations": [...], "has_more": bool}` (the key name is implied by the §8 pattern).
+== S2-151 | api-list | behaviour | ★
+> `direction` is `outgoing` (the caller is the payer), `incoming` (the caller is the receiver), or absent for both.
+~ Note the mapping is the mirror of GET /requests.
+== S2-152 | api-list | behaviour | ★
+> `status` is one of the four statuses, or absent for all. An authorisation expired by the clock matches `expired`, never `open`.
+== S2-153 | api-list | limit | -
+> `limit`, `offset` and `has_more` behave exactly as on `GET /requests`.
+~ Default 50, 1..200, offset >= 0, plain-digit query values, unknown direction/status 422, unknown params ignored, has_more boundaries.
+== S2-154 | auth-ui | UI-state | -
+> `wallet-balance` | Formatted `total`, retaining the existing display and `data-amount`
+~ Changes S2-032 for stage 2: balance shown is total (includes held money).
+== S2-155 | auth-ui | UI-state | ★
+> `wallet-available` | Formatted `available`, with `data-amount`. **Present this as the headline number** — it is what the user can actually spend
+~ Present on `/` always (with data-amount); headline = visually dominant (S2-016).
+== S2-156 | auth-ui | UI-state | ★
+> `wallet-held` | Formatted `held`, with `data-amount`. Absent when `held` is zero
+== S2-157 | auth-ui | UI-state | -
+> `authorize-handle`, `authorize-amount`, `authorize-note`, `authorize-visibility`, `authorize-submit` | The authorise form. Same input rules as the pay form
+~ The form may live on `/` or on `/authorizations`; the probes look on both. Decimal parsing and select values as in S2-044/S2-045.
+== S2-158 | auth-ui | UI-state | -
+> `authorize-error` | Shown when the authorisation is refused, including insufficient available funds
+~ Insufficient available (even though total would cover it), unknown handle, own handle, bad decimal.
+== S2-159 | auth-ui | UI-state | ★
+> `authorization-list` | Container on `/authorizations`. Children newest first in the DOM
+== S2-160 | auth-ui | UI-state | -
+> `authorization-item-{authorization_id}` | Carries `data-status="{status}"`
+~ Items of every status (open, captured, voided, expired incl. expired by the clock) for payer and receiver.
+== S2-161 | auth-ui | UI-state | -
+> `authorization-amount-{id}` | Text is exactly the formatted authorised amount
+== S2-162 | auth-ui | UI-state | ★
+> `authorization-captured-{id}` | Formatted captured amount. Present only when `status` is `captured`
+~ Absent for open (even partially captured), voided and expired items.
+== S2-163 | auth-ui | UI-state | ★
+> `authorization-expires-{id}` | Text is the RFC 3339 `expires_at`
+~ Equal as an instant to the API's expires_at (any numeric offset or Z form accepted for the instant, the text itself must parse as RFC 3339).
+== S2-164 | auth-ui | UI-state | ★
+> `authorization-capture-amount-{id}` | Decimal input, pre-filled with the remaining amount. Present only on an incoming `open` authorisation
+== S2-165 | auth-ui | UI-state | -
+> `authorization-capture-{id}` | Button. Present only on an incoming `open` authorisation
+~ Capture through the UI (full and partial decimal amount) creates the payment and closes the authorization, releasing the remainder (final capture).
+== S2-166 | auth-ui | UI-state | -
+> `authorization-void-{id}` | Button. Present only on an outgoing `open` authorisation
+== S2-167 | auth-ui | UI-state | ★
+> `authorization-error` | Shown when a capture or a void is refused
+~ Voided or captured elsewhere while the button is visible; bad decimal capture amount (no request sent).
+== S2-168 | auth-ui | UI-state | -
+> `empty-authorizations` | Shown when the list is empty
+== S2-169 | auth-ui | behaviour | ★
+> The UI and the API share `/authorizations`: serve HTML for `Accept: text/html` and JSON otherwise, as for `/requests`.
+== S2-170 | auth-ui | UI-state | ★
+> The UI must reflect seeded and newly created holds. Show available funds as the user's spending balance, including immediately after reset with open holds.
+~ Page loaded right after a reset whose fixture holds funds shows wallet-available = balance − holds, wallet-held, and the seeded authorizations in the list.
+== S2-171 | concurrent | concurrency | ★
+> Concurrent requests must produce the same results as executing them one at a time in some order, and the requirements above hold at every read.
+~ Bursts: N authorizations against `available`; N concurrent captures (final / non-final / same key / different keys); capture vs void; payments vs authorizations vs captures vs settlements storm; a sampler checks every /me read.
+== S2-172 | upgrade | data-migration | ★
+> A stage-2 service must accept an export produced by the same team's stage-1 service.
+~ Extension of §10 (S1-179…S1-183) to stage 2: an export of a stage-2 state restores authorizations (status, captured_amount, payment_ids, remaining, absolute expires_at), holds, authorization_ttl_seconds, and every idempotent authorize/capture receipt; replays return 200 with the original bodies; failed keys stay reusable; ids created later do not collide; clock expiry persists through import.
+== S2-173 | upgrade | data-migration | ★
+> The fixture gains a service-wide default lifetime and an `authorizations` array.
+~ Reset replaces authorizations and TTL completely (S1-027/S1-184 extended): after a reset, earlier authorizations, holds and TTL are gone.

@@ -103,6 +103,7 @@ class Requests(Path):
 
 class PayRequest(Path):
     name = "POST /requests/{id}/pay"
+    nf_url = "/requests/rq_missing/pay"
 
     def fresh(self):
         self.w = world({"ada": 100_000, "bob": 0, "cy": 100_000})
@@ -183,9 +184,10 @@ class Settlements(Path):
 PATHS = [Payments, Requests, PayRequest, Splits, Settlements]
 
 
-def each_path(fn):
+def over(classes, fn):
+    """Run one matrix check over the given Path classes (stage 2 reuses this for its extra paths)."""
     def run():
-        for cls in PATHS:
+        for cls in classes:
             p = cls().fresh()
             try:
                 fn(p)
@@ -194,7 +196,12 @@ def each_path(fn):
                 raise AssertionError("[%s] %s" % (p.name, e))
     run.__name__ = fn.__name__
     run.__doc__ = fn.__doc__
+    run.__wrapped__ = fn
     return run
+
+
+def each_path(fn):
+    return over(PATHS, fn)
 
 
 def same_json(a, b):
@@ -270,7 +277,7 @@ def test_key_of_a_failed_request_is_reusable(p):
     eq(p.effect(), one, "one effect")
     # 404 failures do not claim the key either
     k2 = fresh_key()
-    if p.name != "POST /requests/{id}/pay":
+    if not getattr(p, "nf_url", None):
         expect(p.call(1, k2, "nf"), 404, "not_found")
         r2 = expect(p.call(1, k2, "B"), 201, msg="same key after a 404, different body")
         expect(p.call(1, k2, "B"), 200, msg="replay")
@@ -278,7 +285,7 @@ def test_key_of_a_failed_request_is_reusable(p):
     else:
         # unknown request id => 404, then the key still works on a real request
         k3 = fresh_key()
-        expect(http("POST", "/requests/rq_missing/pay", body={}, token=p.actor(1).token, key=k3), 404, "not_found")
+        expect(http("POST", p.nf_url, body=p.body("A"), token=p.actor(1).token, key=k3), 404, "not_found")
         expect(p.call(1, k3, "A", idx=1), 201, msg="key after a 404")
     # an unauthenticated or forbidden attempt does not claim anyone's key
     k4 = fresh_key()
