@@ -225,3 +225,5 @@ input:focus-visible, select:focus-visible { border-color: var(--focus); }
   .item { flex-direction: column; }
   .item-amount { text-align: left; }
 }
+.notice-info { color: var(--info-ink); background: var(--info-bg); border-color: #a9c8ef; font-weight: 500; }
+.page.auth-page { min-height: 0; padding-top: 2rem; }

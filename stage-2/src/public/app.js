@@ -211,12 +211,22 @@
 
   // ------------------------------------------------------------ auth screens
 
-  function authScreen(kind) {
+  // `me` is set when a signed-in visitor opens /login or /signup directly: the
+  // form is still shown (to switch accounts) inside the signed-in layout.
+  function authScreen(kind, me) {
     const isLogin = kind === 'login';
     const card = h('section', { class: 'auth-card' });
-    app.replaceChildren(h('main', { class: 'auth-page' },
-      h('a', { href: '/', class: 'brand brand-large' }, h('span', { class: 'brand-mark', 'aria-hidden': 'true' }, 'P'), 'Pocketful'),
-      card));
+    if (me) {
+      const main = shell(me);
+      main.classList.add('auth-page');
+      main.append(card);
+      card.append(h('p', { class: 'notice notice-info', role: 'status' }, 'You are signed in as @' + me.handle + '. ',
+        isLogin ? 'Log in below to switch accounts.' : 'Create another account below, or go back to your ', isLogin ? null : h('a', { href: '/' }, 'wallet'), isLogin ? null : '.'));
+    } else {
+      app.replaceChildren(h('main', { class: 'auth-page' },
+        h('a', { href: '/', class: 'brand brand-large' }, h('span', { class: 'brand-mark', 'aria-hidden': 'true' }, 'P'), 'Pocketful'),
+        card));
+    }
     const email = h('input', { type: 'email', 'data-testid': kind + '-email', autocomplete: 'email' });
     const password = h('input', { type: 'password', 'data-testid': kind + '-password', autocomplete: isLogin ? 'current-password' : 'new-password' });
     const name = isLogin ? null : h('input', { type: 'text', 'data-testid': 'signup-display-name', autocomplete: 'name' });
@@ -782,20 +792,18 @@
     await screen(r.data, boot);
   }
 
-  async function guestOnly(kind) {
+  async function authRoute(kind) {
+    let me = null;
     if (getToken()) {
       try {
         const r = await api('GET', '/me');
-        if (r.status === 200) {
-          location.replace('/');
-          return;
-        }
-      } catch (e) { /* fall through to the form */ }
+        if (r.status === 200) me = r.data;
+      } catch (e) { /* show the plain form */ }
     }
-    authScreen(kind);
+    authScreen(kind, me);
   }
 
   const screens = { '/': walletScreen, '/requests': requestsScreen, '/split': splitScreen, '/authorizations': authorizationsScreen };
-  if (route === '/login' || route === '/signup') guestOnly(route.slice(1));
+  if (route === '/login' || route === '/signup') authRoute(route.slice(1));
   else signedIn(screens[route] || walletScreen);
 })();
