@@ -23,3 +23,14 @@
 - Non-blocking reviewer notes: effective_at accepted up to 2 s past server clock (/me vs /me?as_of=now can disagree for 2 s); statement snapshots kept unbounded until reset.
 - Accepted commit: cc562c1680116428e41851948619571f547e9094 (verdict fe817bb, factory/reviews/stage-3-r1.md).
 
+## Stage 4 report
+- Start / end (UTC): 2026-10-03 08:53 / 09:24
+- Review rounds: 1 (round 1 ACCEPT). Rejections: none.
+- Ledger items: 52 total (plus stages 1-3 carried forward); 51 covered by a passing probe, 0 manual; 1 known gap: S4-045 (stage-3 half) — snapshot tokens issued by the accepted stage-3 service cannot be retained across a stage-3 export because cc562c1's export never serialised snapshots; stage-3/ is accepted and frozen (coordinator decision, option b); stage-4 export/import of its own snapshots (S4-049) passes. Settlement membership, corrections, refunds and batches from a stage-3 export are retained.
+- Reviewer final check: clean build, --cpus 2 --memory 2g --network none, /health 200 in <2 s; harness isolated stage 4: stages 1-4 147/147, 35/35, 6/6, 5/5 (claimed stage: 4); run_docker.sh --offline --stage1-ref 247843d --stage2-ref 2dcc6ae --stage3-ref cc562c1: phase A 202 pass / 2 fail, offline phase 173 pass / 0 fail / 4 skipped by design. The 2 failures are probe defects (upgrade probes compare payment objects without ignoring the mandatory refund_of: null; with that ignored, all 8 upgrade probes pass 8/8); analyst asked to fix the helpers. Reviewer's own 50-check script all correct; stage-1..3 folders untouched.
+- Accepted commit: 777b76d6609432183d3e8928b76220ebe64a9817 (verdict 012d229, factory/reviews/stage-4-r1.md).
+
+## Run summary
+- Accepted commits: stage 1 247843d, stage 2 2dcc6ae (after one rejection, F1 null text on /requests), stage 3 cc562c1, stage 4 777b76d. Review rounds 1/2/1/1.
+- Known gaps: S4-045 stage-3 snapshot retention across a stage-3 export (above); probe defects in two stage-1/3 upgrade comparison helpers (probe-side, not product).
+
