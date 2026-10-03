@@ -268,6 +268,80 @@ def test_people_first_formatting_no_raw_ids_or_timestamps():
         ok('"balance"' not in pg.page.evaluate("() => document.body.innerText"), "raw API JSON visible")
 
 
+JS_LEAK = """() => { const walk = n => { let out = []; if (n.nodeType === 3) { out.push(n.nodeValue); }
+    else if (n.nodeType === 1 && !['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE'].includes(n.tagName)) { n.childNodes.forEach(c => { out = out.concat(walk(c)); }); }
+    return out; };
+  return {inner: document.body ? document.body.innerText : '', text: walk(document.body).join('\\n'),
+          attrs: [...document.querySelectorAll('*')].flatMap(e => ['value', 'placeholder', 'title', 'aria-label', 'alt'].map(a => e.getAttribute(a)).filter(v => v !== null)).join('\\n')}; }"""
+LEAK = re.compile(r"(?<![\w-])(null|undefined|NaN|Infinity|-Infinity)(?![\w-])|\[object \w+\]|\{\{|\}\}|\$\{")
+
+
+def leaked(pg):
+    d = pg.page.evaluate(JS_LEAK)
+    for part in ("inner", "text", "attrs"):
+        m = LEAK.search(d[part])
+        if m:
+            i = max(0, m.start() - 40)
+            return "%r in %s: ...%s..." % (m.group(0), part, d[part][i:m.end() + 40].replace("\n", " / "))
+    return None
+
+
+@test("S2-015", "S2-020", "S2-017", "S2-023")
+def test_no_leaked_null_undefined_nan_text_on_routes_with_data():
+    """A stringified missing value (`null`, `undefined`, `NaN`, `[object Object]`, an unfilled template) must not be
+    visible anywhere on any screen, at 375 and 1280 px, for a data-rich account, a data-less account and the signed-out
+    screens, and after the main actions."""
+    rich_world()
+    for width in (375, 1280):
+        with session(viewport=(width, 900)) as pg:
+            for path in ("/login", "/signup"):
+                pg.go(path)
+                pg.page.wait_for_timeout(300)
+                bad = leaked(pg)
+                ok(not bad, "%s (signed out, %dpx) leaks a missing value: %s" % (path, width, bad))
+            open_as(pg, "ada")
+            for path in ROUTES:
+                pg.go(path)
+                pg.wait(lambda: pg.visible("current-user"), "current-user on " + path)
+                pg.page.wait_for_timeout(700)    # lists render after their data requests
+                bad = leaked(pg)
+                ok(not bad, "%s (ada, data-rich, %dpx) leaks a missing value: %s" % (path, width, bad))
+            # after actions: a refused payment, a successful one, a request, and the lists that change
+            pg.go("/")
+            pg.wait_visible("pay-submit")
+            fill_pay(pg, "bob", "99999.99", "x")
+            pg.tid("pay-submit").click()
+            pg.page.wait_for_timeout(700)
+            bad = leaked(pg)
+            ok(not bad, "/ after a refused payment (%dpx) leaks a missing value: %s" % (width, bad))
+            fill_pay(pg, "bob", "1.00", "ok")
+            pg.tid("pay-submit").click()
+            pg.page.wait_for_timeout(900)
+            bad = leaked(pg)
+            ok(not bad, "/ after a successful payment (%dpx) leaks a missing value: %s" % (width, bad))
+            for path in ("/requests", "/authorizations"):
+                pg.go(path)
+                pg.wait(lambda: pg.visible("current-user"), "current-user on " + path)
+                pg.page.wait_for_timeout(700)
+                for prefix in ("request-pay-", "request-decline-", "request-cancel-", "authorization-void-"):
+                    btns = pg.ids(prefix)
+                    if btns:
+                        pg.tid(prefix + btns[0]).click()
+                        pg.page.wait_for_timeout(900)
+                        bad = leaked(pg)
+                        ok(not bad, "%s after %s (%dpx) leaks a missing value: %s" % (path, prefix, width, bad))
+                        break
+    # an account with nothing at all: every empty state renders without a stray value
+    with session(viewport=(375, 900)) as pg:
+        open_as(pg, "abcdefghijklmnopqrst")
+        for path in ROUTES:
+            pg.go(path)
+            pg.wait(lambda: pg.visible("current-user"), "current-user on " + path)
+            pg.page.wait_for_timeout(700)
+            bad = leaked(pg)
+            ok(not bad, "%s (empty account) leaks a missing value: %s" % (path, bad))
+
+
 @test("S2-023", "S2-010", "S2-021", "S2-015")
 def test_navigation_empty_loading_and_error_states_and_assets():
     rich_world()

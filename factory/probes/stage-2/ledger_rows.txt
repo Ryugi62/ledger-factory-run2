@@ -62,7 +62,7 @@
 ~ Proxy: computed colour/background/border/opacity signatures differ between request statuses (pending/paid/declined/cancelled), authorization statuses (open/captured/voided/expired), wallet-available vs wallet-held, and pay-error vs pay-uncertain; a loading indicator is visible while data is slow.
 == S2-020 | quality | UI-state | ★
 > Format people, amounts and timestamps for people first; expose technical identifiers only where they help the user.
-~ Proxy: no ISO-8601 timestamps, `p_…`/`u_…`/`rq_…` ids or JSON in feed/request/authorization item text (authorization-expires is explicitly RFC 3339 and exempt).
+~ Proxy: no ISO-8601 timestamps, `p_…`/`u_…`/`rq_…` ids or JSON in feed/request/authorization item text (authorization-expires is explicitly RFC 3339 and exempt). Also (added after review round 1): no stringified missing value (`null`, `undefined`, `NaN`, `[object Object]`, unfilled template) anywhere in the visible text, attributes or text nodes of any route, at 375 and 1280 px, for a data-rich account, an empty account, the signed-out screens and after the main actions (`u_quality::test_no_leaked_null_undefined_nan_text_on_routes_with_data`).
 == S2-021 | quality | UI-state | ★
 > The required flows must remain clear and usable at a 375 CSS-pixel viewport and at conventional desktop widths, without horizontal page scrolling.
 ~ At 375, 768 and 1280 px, on every route, with long notes/names/handles present: document scrollWidth <= viewport width and every testid control lies inside the viewport horizontally.
