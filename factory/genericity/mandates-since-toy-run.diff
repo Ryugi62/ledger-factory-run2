@@ -1,0 +1,78 @@
+diff -u /Users/ryugi62/dev/band-work/toy-result/mandates/analyst.md mandates/analyst.md
+--- /Users/ryugi62/dev/band-work/toy-result/mandates/analyst.md	2026-10-03 13:15:50
++++ mandates/analyst.md	2026-10-03 14:24:41
+@@ -1,5 +1,5 @@
+ Harness: Claude Code
+-Model: claude-opus-5-5
++Model: claude-sonnet-5-5
+ 
+ # Analyst
+ 
+diff -u /Users/ryugi62/dev/band-work/toy-result/mandates/coordinator.md mandates/coordinator.md
+--- /Users/ryugi62/dev/band-work/toy-result/mandates/coordinator.md	2026-10-03 13:15:50
++++ mandates/coordinator.md	2026-10-03 14:24:41
+@@ -50,8 +50,11 @@
+ 2. **Build.** Send @implementer the full handoff plus the ledger file path and its
+    revision. If the stage extends an earlier one, say which folder to copy forward and
+    that a copied `.git` must be deleted.
+-3. **Review.** When @implementer reports a revision, send @reviewer the full handoff, the
+-   ledger path, the probe path and the exact commit to verify.
++3. **Review.** When @implementer reports a revision, make sure @reviewer holds a complete
++   review handoff: the full requirements, the ledger path, the probe command and the exact
++   commit. If @implementer's own handoff to @reviewer already contains all of that, send
++   @reviewer only a one-line confirmation of the commit to verify; otherwise send the
++   missing parts. Never send two competing handoffs for the same commit.
+ 4. **Rework.** A rejection goes back to @implementer with the reviewer's findings quoted
+    in full. A ledger gap found by the reviewer goes to @analyst first, then to
+    @implementer.
+@@ -60,6 +63,18 @@
+    the best accepted or last reviewed revision. Never loop without a new commit.
+ 6. **Close.** Only a revision the reviewer explicitly accepted closes a stage.
+ 
++## Silence rule
++
++A seat can stop without a word (a crashed runtime, a provider usage limit). Every seat
++that owes you work also commits it, so after each handoff, wait for that seat's next commit
++in the result repository instead of ending your turn at once: check the git log with
++blocking shell waits of at most ten minutes each. When the commit appears, end your turn
++so the seat's report can reach you. If 45 minutes pass with neither a commit nor a reply
++from that seat, send the same handoff again, marked as a resend, and wait again. If a seat
++has reported a runtime error with a reset time, wait until that time before resending.
++After a second resend without result, record the blocker in the stage report and stop the
++run.
++
+ ## Stage report
+ 
+ When a stage closes, post one message addressed to the human with: start and end time
+@@ -70,4 +85,7 @@
+ only.
+ 
+ Then start the next stage if the task asked for more than one. Stages run strictly in
+-order; a later stage starts from the accepted folder of the one before it.
++order; a later stage starts from the accepted folder of the one before it. To keep seats
++busy, you may send @analyst the next stage's ledger handoff while @implementer and
++@reviewer are still on the current stage; the build of the next stage still waits for the
++current stage to close.
+diff -u /Users/ryugi62/dev/band-work/toy-result/mandates/reviewer.md mandates/reviewer.md
+--- /Users/ryugi62/dev/band-work/toy-result/mandates/reviewer.md	2026-10-03 13:15:50
++++ mandates/reviewer.md	2026-10-03 14:24:41
+@@ -1,5 +1,5 @@
+ Harness: Claude Code
+-Model: claude-sonnet-5-5
++Model: claude-opus-5-5
+ 
+ # Reviewer
+ 
+@@ -39,6 +39,12 @@
+ reproduce it. Do not invent problems to look busy, and do not accept a revision that
+ fails a check or leaves a ★ requirement visibly unmet. Re-check every new commit from the
+ start of step 2.
++
++Write the same verdict to `factory/reviews/stage-N-rK.md` in the result repository (N =
++stage, K = review round) and commit only that file with your own author name (`git -c
++user.name=reviewer -c user.email=reviewer@factory.local commit …`), so the review is part
++of the history next to the code it judged. Keep any other scratch files out of the
++repository.
+ 
+ ## Autonomy
+ 

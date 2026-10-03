@@ -1,0 +1,34 @@
+Blind list stage 3: sections "Effective time, recorded time, and corrections" (C) and "GET /statement" (S).
+C1 service distinguishes effective vs recorded time; every payment has revision history
+C2 rev1 amount original, effective_at=recorded_at=created_at
+C3 seeded payment created_at is its rev1 time; omitted -> reset time
+C4 opening balances = seeded ending - net of original seeded payments; corrections don't change opening; new accounts open at 0
+C5 POST /payments/{id}/corrections requires idempotency key; original sender only; non-sender 403; unknown 404; no token 401
+C6 body all fields required: expected_revision positive int; amount int 0..1e9; reason string 1..200; effective_at RFC3339 not later than now; invalid -> 422
+C7 correction doesn't change parties/visibility; appends immutable revision
+C8 201 body payment_id, revision, amount, effective_at, recorded_at (server), reason
+C9 recorded times per payment strictly increase
+C10 stale expected revision -> 409 stale_revision
+C11 replay returns original revision 200 even after newer; different body same key 409 reuse
+C12 difference moves between same two wallets atomically; increase debits sender, decrease debits receiver
+C13 currently unaffordable debit -> 409 insufficient_funds (precedence)
+C14 negative balance at any effective-time boundary -> 409 historical_overdraft; boundary includes combined movements at same instant
+C15 either failure preserves balances, revisions, statements, idempotency state (key not claimed)
+C16 sum of balances = seeded total in every historical view
+C17 original payment and idempotent responses unchanged; activity shows original; corrections not feed payments
+C18 GET /payments/{id}/revisions -> {"revisions":[...]} in order incl rev1 reason ""; only parties; third party 404 even public; no token 401
+C19 GET /me and /statement accept known_at RFC3339; select latest revision recorded <= known_at; none -> contributes nothing; omission = everything known at read start
+C20 apply selected revisions by effective time; as_of inclusive; statement half-open
+C21 both instants may be future; invalid/empty -> 422; echo known_at exactly
+C22 statement ordering by selected effective_at then payment id; entries add revision, effective_at, recorded_at; payment.amount = selected amount
+C23 zero-amount revisions still entries with zero delta; no double counting
+C24 no corrections + no known_at -> previous behaviour unchanged
+S1 from/to optional; from default wallet opening; to default now; limit/offset like requests
+S2 payments caller sent/received in [from,to), oldest first, with balance_after
+S3 response opening_balance, entries{payment,delta,balance_after}, closing_balance, has_more (+snapshot)
+S4 order created_at asc then payment id asc
+S5 opening = balance immediately before from; closing = immediately before to
+S6 opening + sum deltas (full window) = closing; sent negative, received positive
+S7 pagination does not change balance_after or opening/closing
+S8 only caller's payments, regardless of public
+S9 (implied) from/to invalid -> 422; limit/offset rules

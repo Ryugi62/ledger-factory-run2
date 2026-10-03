@@ -1,0 +1,59 @@
+Blind list (sections 8 API and 4 Model), before opening ledger.
+§4:
+B4.1 one currency declared in fixture; amounts integer minor units
+B4.2 amounts 1000, 1000.0, 1e3 all valid same amount; booleans/strings not numbers
+B4.3 handle unique, ^[a-z0-9_]{1,20}$, never changes
+B4.4 seeded users take handle from fixture
+B4.5 signup handle derived: local part, lowercase, non [a-z0-9_] -> _, truncate 20
+B4.6 derived handle taken -> signup fails (409 handle_taken)
+B4.7 new users balance 0; can receive and be asked immediately
+B4.8 payment moves money atomically
+B4.9 request pending then exactly one of paid/declined/cancelled
+B4.10 only payer pays/declines; only requester cancels
+B4.11 request may exceed payer balance; creation not error
+B4.12 pay while short -> 409 insufficient_funds, changes nothing; later payable
+B4.13 visibility chosen by payer on pay; request has no visibility
+B4.14 activity returns payments only; iff public or caller is sender/receiver
+B4.15 requests never in activity; GET /requests only caller requester or payer
+B4.16 split not a feed item
+B4.17 visibility same value for both parties and others; private not hidden from receiver
+B4.18 amount <= 1e9; balances within ±2^53; exact arithmetic
+B4.19 seeded users can log in immediately with password
+B4.20 fixture balance is post-payments; no replay
+B4.21 negative fixture balance -> 422 validation_failed, nothing changes
+B4.22 minor_units 0,2,3 (EUR/JPY/BHD)
+§8:
+B8.1 GET /me shape user_id, display_name, handle, balance, currency, minor_units
+B8.2 POST /payments requires Idempotency-Key
+B8.3 note optional default ""; visibility optional default public
+B8.4 201 payment shape incl request_id null, created_at, currency, from/to ids+handles
+B8.5 balance < amount -> 409 insufficient_funds
+B8.6 amount <1, >1e9, non-integer -> 422
+B8.7 to_handle self -> 422 self_payment
+B8.8 note >200 -> 422
+B8.9 visibility other -> 422
+B8.10 unknown handle -> 404
+B8.11 debit/credit atomic; failed payment leaves no trace
+B8.12 note verbatim, unicode/emoji round trip
+B8.13 POST /requests idempotent; caller requester; 201 shape (status pending, payment_id null)
+B8.14 requests: amount 422, self_request 422, note>200 422, unknown handle 404
+B8.15 payer balance not checked at request creation
+B8.16 pay: idempotent; only payer; body visibility optional default public
+B8.17 pay replay must be identical body; {} vs {"visibility":"public"} -> 409 reuse
+B8.18 pay returns 201 payment with request_id; request becomes paid with payment_id
+B8.19 pay: not pending 409 request_not_pending; short 409 insufficient_funds; not payer 403; unknown 404
+B8.20 pay replay -> 200 original body even when paid; no extra money; not 409
+B8.21 decline: payer only, no key, 200 declined; twice 200; paid/cancelled 409; non-payer 403
+B8.22 cancel: requester only, 200 cancelled; twice 200; paid/declined 409; non-requester 403
+B8.23 GET /requests: caller's only, newest first by created_at
+B8.24 direction incoming/outgoing/absent; status 4 values/absent; unknown -> 422
+B8.25 limit default 50, 1..200; offset default 0, >=0; else 422
+B8.26 has_more semantics; response {requests, has_more}
+B8.27 splits idempotent; caller may be included or omitted; shares §9 in order
+B8.28 request for every participant except caller, caller requester
+B8.29 split response shape split_id, amount, currency, note, shares, requests, created_at
+B8.30 shares includes caller, in order, sums to amount; requests excludes caller same order
+B8.31 split errors: amount 422; empty/duplicate participants 422; note>200 422; unknown handle 404
+B8.32 split only caller valid: one share, zero requests
+B8.33 split checks no balance
+B8.34 GET /activity feed rule, newest first; {payments, has_more}; limit/offset like requests

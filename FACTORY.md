@@ -41,7 +41,8 @@ single task message (first message in `room.json`).
    as a row with an ID, a kind and the probe that exercises it; ★ marks the rows a minimal
    build would skip. This run: **553 rows** (208 / 173 / 120 / 52; 315 ★), 532 covered by
    a passing probe, 20 manual, 1 known gap (counts from the coordinator's stage reports;
-   the stage-2 ledger file itself lists 8 manual rows where the report says 7). Cost: the
+   the stage-2 ledger file itself lists 8 manual rows where the report says 7 — the file
+   is authoritative, so read 165 + 8 for stage 2). Cost: the
    analyst is the most expensive seat — 53 % of the run's model spend — and the slowest at
    the start: 72 min for the stage-1 ledger.
    To hide that, the coordinator pipelines: it sends the *next* stage's ledger handoff while
@@ -49,9 +50,11 @@ single task message (first message in `room.json`).
    closed; the stage-3 ledger landed 8 min after stage 2 closed, so the implementer waited
    8 min there. During the stage-1 ledger it waited 73 min — the price of ledger-first.
 2. **Probes are independent of the shipped checks.** The analyst never opens them, so its
-   probes are a second, spec-derived opinion. The implementer does read the probes before
-   coding — they are the specification in executable form, which is the point — but the
-   reviewer re-checks with its own scripts, so passing the probes is never enough. They
+   probes are a second, spec-derived opinion. The implementer does read them before coding
+   (06:39 in stage 1: it read the probes' assertions, then wrote the service) — that is
+   test-first work against tests derived from the spec by a seat that never saw the shipped
+   checks, which is the point of the design. The reviewer then re-checks with its own
+   scripts, so passing the probes is never enough. They
    exercise retries, concurrent bursts, upgrades from the previous stage's export, an
    offline container with 2 vCPU / 2 GiB, and the UI through a headless browser.
 3. **A reviewer that does not trust the ledger.** Before opening it, the reviewer lists
@@ -115,11 +118,11 @@ hit their usage limit. Only the task message differed.
 | What | Found by | Evidence | Fixed by |
 |---|---|---|---|
 | `/requests` rendered a literal `null` whenever the user had requests (ledger S2-015, ★S2-020). All shipped checks and all probes passed. | reviewer, own Playwright session | `factory/reviews/stage-2-r1.md` (REJECT on 4beb1c4) | implementer 2dcc6ae; analyst added a leaked-text probe for every route (1940007) |
-| Two stage-1 edge cases: a signup that is mid-hash during a reset lands in the new state; an imported password hash with an extreme cost could make that login fail | reviewer, diff reading (stage 1) | `stage-1-r1.md` | implementer, in stage 2 (confirmed in `stage-2-r1.md`) |
+| Two stage-1 edge cases: a signup that is mid-hash during a reset lands in the new state; an imported password hash with an extreme cost could make that login fail | reviewer, diff reading (stage 1) | `stage-1-r1.md` | implementer `d4c51d3`, in stage 2 (confirmed in `stage-2-r1.md`) |
 | A probe script ignored the stage folder and failed on a correct build | reviewer | `stage-1-r1.md` | analyst 169cac5 |
 | Upgrade probes compared payments without ignoring fields later stages add | reviewer | `stage-4-r1.md` | analyst 1837adf |
-| Stage 3 accepted a correction `effective_at` up to 2 s in the future | reviewer, non-blocking note | `stage-3-r1.md` | implementer, in stage 4 (strict against the service clock; confirmed in `stage-4-r1.md`) |
-| Capture with an empty body returns 400 while pay treats it as `{}` | reviewer, non-blocking note | `stage-2-r1.md` | **not changed** — listed under known gaps |
+| Stage 3 accepted a correction `effective_at` up to 2 s in the future | reviewer, non-blocking note | `stage-3-r1.md` | implementer `3a3b3e3`, in stage 4 (strict against the service clock; confirmed in `stage-4-r1.md`) |
+| Capture with an empty body returns 400 while pay treats it as `{}` | reviewer, non-blocking note | `stage-2-r1.md` | **dropped — a teamwork miss.** Nobody owned non-blocking notes, so this one was never decided. Rule we would add: every non-blocking note becomes a ledger row of the next stage, so it is either fixed or explicitly waived |
 | Stage-3 exports cannot carry statement snapshots that stage 4 wants (S4-045) | analyst + reviewer | `stage-4-r1.md` | recorded as a known gap; stage 3 stays frozen — see below |
 
 Two seats addressing each other, both directions (from `room.json`):
@@ -145,12 +148,22 @@ inside the signed-in layout instead of redirecting; it contains no fixture value
 test name or test-only branch. The rows it cites: S2-008/S2-009 — the route table lists
 `/signup` and `/login` as routes of the product — and ★S2-029 — "`current-user` | Visible
 on every screen when signed in". A search of all 1,555 room messages finds no other tool
-call that opened a shipped test file; the analyst never did. It should have gone to the
-analyst as a probe gap; we disclose it rather than hide it.
+call that opened a shipped test file; the analyst never did. **We concede the point:** this
+one behaviour (a signed-in user opening `/login` and `/signup` sees the form) was learned
+from a shipped test. The ledger listed both routes but no row said what a signed-in visitor
+sees there, and the implementer went to the test instead of sending the gap to the analyst.
+The fix is general product behaviour, not a branch for the test — but the right path was
+"failing log → probe gap → analyst", and the implementer mandate should say "failure logs
+only, never test source".
 
-The reviewer, too, worked partly outside the repository: in stage 4 it patched two probe
-comparison helpers in a scratch copy (`review-tmp/`) to confirm the failures were probe
-defects before the analyst fixed them in the repository (1837adf).
+The reviewer, too, bent its mandate once. In stage 4 two upgrade probes failed. It patched
+the two comparison helpers in a scratch copy to confirm the failures were probe defects
+(both compared payments without ignoring the `refund_of: null` field stage 4 adds), asked
+the analyst to fix them, and accepted at 09:24. The analyst's fix (`1837adf`) landed at
+09:13, but the verdict cites the scratch run, not a rerun on the repository version — the
+mandate says not to accept with a failing check. Its blind lists and own check scripts,
+left outside the repository during the run, are archived unchanged in
+`factory/reviews/extra/` (copied by the human after the run).
 
 ## What we tried that failed
 
@@ -189,6 +202,24 @@ defects before the analyst fixed them in the repository (1837adf).
 
 Point the same mandates at another problem by changing only that one message.
 
+## Hidden-test misses we expect
+
+The factory's own prediction, per stage, of where the hidden suites may fail it:
+- Stage 1–2: little expected — 79 % and 35 % of checks shipped, all green, plus 83 and 144 docker-phase probe
+  assertions. Possible: capture with an empty body (400, not treated as `{}`).
+- Stage 3 (9 % shipped): edge cases of statement snapshot paging and `known_at` views
+  beyond what our 154–184 probe assertions cover.
+- Stage 4 (16 % shipped): **S4-045** — snapshot tokens issued by the stage-3 service do not
+  survive its export → import into stage 4. Most likely a real loss.
+
+## Genericity evidence
+
+`factory/genericity/`: the toy-track rehearsal's git log and the diff of the mandates since
+that run (78 lines: harness/model lines, the duplicate-handoff rule, review commits,
+pipelining, the silence rule). The same mandates built the organizers' unrelated counter
+service through two accepted stages. The word "ledger" is the factory's own term, chosen
+before the track was picked; `harness check` finds no track vocabulary.
+
 ## Code map (stage-4, for a maintainer)
 
 `stage-4/src/server.js` (1,748 lines, Node.js standard library only) is one module in
@@ -202,7 +233,13 @@ batches (1411–1550) · auth (1551) · routing and HTML/JSON negotiation (1608)
 runs synchronously on the event loop, which is the whole concurrency story. The UI is
 `src/public/app.js` (814 lines) + `app.css` (229, design tokens), unchanged since stage 2:
 pocketful stages 3 and 4 specify API behaviour only. The regression suite is
-`factory/probes/stage-1..4/`; there are no unit tests inside the stage folders.
+`factory/probes/stage-1..4/`; there are no unit tests inside the stage folders — a cost of
+letting the band choose one-file services. To re-run it against a stage:
+`python3 factory/probes/stage-N/run_all.py http://127.0.0.1:8080` (service running), or
+`factory/probes/stage-N/run_docker.sh --offline` to build the folder and test it in an
+offline 2 vCPU / 2 GiB container. To add an endpoint: add the ledger rows, a probe, a
+handler in the operations section and a route in the routing section — commit `3a3b3e3`
+(refunds and correction batches) is a worked example.
 
 ## Limitations
 

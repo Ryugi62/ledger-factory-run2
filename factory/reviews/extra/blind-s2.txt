@@ -1,0 +1,30 @@
+Blind list stage 2 (API section + Authorizations and captures section), before ledger.
+AC1 sum of totals = seeded total; hold moves no money
+AC2 available = total - held never negative; held funds cannot fund payments, authorizations, settlement net debits; captures may spend reserved money
+AC3 cumulative captures <= authorized; each idempotent capture moves money once; closed hold cannot be captured
+AC4 /me keeps balance == total; adds available, held; no holds => equal, held 0
+AC5 POST /payments immediate, no hold
+AC6 insufficient_funds on payments, pay request, settlements evaluated against available
+AC7 paying request immediate; authorizing request out of scope; splits unchanged
+AC8 seven idempotent paths: authorizations and captures added, same replay rules
+API1 GET /me shape incl total/available/held
+API2 POST /authorizations requires key; caller payer; note/visibility defaults
+API3 201 shape: authorization_id, from/to ids+handles, amount, captured_amount 0, currency, note, visibility, status open, expires_at, payment_id null, created_at (+remaining_amount)
+API4 expires_at = created_at + ttl
+API5 errors: available<amount 409; amount 422; self 422 self_payment; note/visibility 422; unknown 404
+API6 open authorization not in activity
+API7 capture: key required; only receiver; amount optional default remaining
+API8 capture replay identical body; {} vs {"amount":N} -> 409 reuse
+API9 capture returns 201 payment shape + authorization_id, request_id null; amount=captured; note/visibility from auth; in feed by rule
+API10 non-auth payments carry authorization_id null
+API11 default final capture: captured, captured_amount, payment_id, releases remainder same step
+API12 second capture after final -> 409 authorization_not_open
+API13 final:false keeps remainder held, stays open; capture of full remainder closes even with final false; final boolean default true (non-boolean -> 400?)
+API14 capture_exceeds compares with remaining; captured_amount cumulative; payment_id latest; payment_ids all in order
+API15 every auth response has remaining_amount (zero when closed)
+API16 void/expiry close partially captured auth releasing remainder, preserving capture records
+API17 new fields don't change idempotency body equality
+API18 capture errors: not open 409; expired 409 authorization_expired; exceeds 422; amount <1/non-int 422; not receiver 403; unknown 404
+API19 void: payer only, no key, 200 voided; already voided 200; captured/expired 409 authorization_not_open
+API20 capture/void stranger -> 403
+API21 GET /authorizations only involving caller; newest first; direction outgoing/incoming; status 4 values; clock-expired matches expired not open; limit/offset/has_more as requests

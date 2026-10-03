@@ -1,0 +1,9 @@
+f8428ea analyst Add stage 3 concurrency ledger and synchronized burst probes
+3977cd1 coordinator run-log: stage 2 report
+50a5692 implementer stage-2: counter page at / with counter-value and increment-button
+78713a8 implementer stage-2: copy accepted stage-1 forward (S2-001, S2-002, S2-012)
+e1657c1 analyst Add stage 2 ledger and browser regression probes
+cf93a7d coordinator run-log: stage 1 report
+040b6c3 implementer stage-1: shared counter service, Dockerfile, RUN.md
+1c0a954 analyst Add stage 1 requirement ledger and independent HTTP probes
+082b972 Ryugi62 (human) factory mandates (rehearsal copy)
