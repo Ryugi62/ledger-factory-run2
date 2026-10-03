@@ -258,8 +258,9 @@ def test_stage1_export_is_accepted_by_stage2():
     def strip(o):
         o = copy.deepcopy(o)
         if isinstance(o, dict):
-            if o.get("authorization_id", 1) is None:
-                o.pop("authorization_id")
+            for nk in ("authorization_id", "refund_of", "correction_batch_id"):     # keys added by later stages, null on old payments
+                if o.get(nk, 1) is None:
+                    o.pop(nk)
             for k in ("total", "available", "held"):
                 o.pop(k, None) if "user_id" in o else None
             return {k: strip(v) for k, v in o.items()}

@@ -7,8 +7,17 @@ from datetime import timedelta
 from lib3 import *  # noqa: F401,F403
 
 
+def _strip_later_nulls(o):
+    """Keys that later stages add to payment/revision objects as null (refund_of, correction_batch_id) do not count as differences."""
+    if isinstance(o, dict):
+        return {k: _strip_later_nulls(v) for k, v in o.items() if not (k in ("refund_of", "correction_batch_id") and v is None)}
+    if isinstance(o, list):
+        return [_strip_later_nulls(x) for x in o]
+    return o
+
+
 def dumps(o):
-    return json.dumps(o, sort_keys=True, ensure_ascii=False)
+    return json.dumps(_strip_later_nulls(o), sort_keys=True, ensure_ascii=False)
 
 
 def export():
