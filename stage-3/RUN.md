@@ -1,9 +1,11 @@
 # Pocketful — stage 3
 
 Node.js HTTP service with no third-party dependencies; all state is held in memory.
-It serves the JSON API and the browser UI (`/`, `/requests`, `/split`, `/authorizations`,
-`/signup`, `/login`) from the same port. All UI assets (script, stylesheet; system fonts
-only) are inside the image, so nothing is loaded from the network at run time.
+It serves the JSON API (including historical balances via `GET /me?as_of=&known_at=`,
+`GET /statement` with snapshot paging, payment corrections and revision histories) and
+the browser UI (`/`, `/requests`, `/split`, `/authorizations`, `/signup`, `/login`) from
+the same port. All UI assets (script, stylesheet; system fonts only) are inside the
+image, so nothing is loaded from the network at run time.
 
 ## Build and start
 
