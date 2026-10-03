@@ -1,10 +1,12 @@
 'use strict';
-// Pocketful stage 1: wallet, payments, requests, splits and settlements over HTTP.
+// Pocketful stage 2: wallet, payments, requests, splits, settlements, payment
+// authorizations (holds and captures) over HTTP, plus the browser UI.
 // All state lives in memory. Every state-changing step runs synchronously on the
 // event loop, so each operation is atomic with respect to every other request.
 
 const http = require('http');
 const crypto = require('crypto');
+const ui = require('./ui');
 
 const MAX_AMOUNT = 1000000000;
 const MAX_ABS_BALANCE = 2 ** 53;
@@ -13,6 +15,10 @@ const MAX_BODY = 8 * 1024 * 1024;
 const HANDLE_RE = /^[a-z0-9_]{1,20}$/;
 const DIGITS_RE = /^[0-9]+$/;
 const REQUEST_STATUSES = ['pending', 'paid', 'declined', 'cancelled'];
+const AUTH_STATUSES = ['open', 'captured', 'voided', 'expired'];
+const DEFAULT_TTL = 600;
+const SERVICE_STAGE1 = 'pocketful-stage-1';
+const SERVICE_STAGE2 = 'pocketful-stage-2';
 
 // ---------------------------------------------------------------- errors
 
@@ -31,9 +37,24 @@ const forbidden = (m) => new ApiError(403, 'forbidden', m || 'forbidden');
 
 // ---------------------------------------------------------------- helpers
 
+// RFC 3339 with an explicit numeric offset; milliseconds only when nonzero.
+function stampOf(ms) {
+  const iso = new Date(ms).toISOString();
+  const frac = iso.slice(19, 23);
+  return iso.slice(0, 19) + (frac === '.000' ? '' : frac) + '+00:00';
+}
+
 function nowStamp() {
-  // RFC 3339, second precision, explicit numeric offset.
-  return new Date().toISOString().slice(0, 19) + '+00:00';
+  // Second precision, so created_at + ttl is exact.
+  return stampOf(Math.floor(Date.now() / 1000) * 1000);
+}
+
+const RFC3339_RE = /^\d{4}-\d\d-\d\d[Tt ]\d\d:\d\d:\d\d(\.\d+)?([Zz]|[+-]\d\d:\d\d)$/;
+
+function parseStamp(v) {
+  if (typeof v !== 'string' || !RFC3339_RE.test(v)) return null;
+  const ms = Date.parse(v.replace(' ', 'T'));
+  return Number.isFinite(ms) ? ms : null;
 }
 
 function codePoints(s) {
@@ -137,7 +158,8 @@ function parseHash(stored) {
   const parts = typeof stored === 'string' ? stored.split('$') : [];
   if (parts.length !== 6 || parts[0] !== 'scrypt') return null;
   const [N, r, p] = parts.slice(1, 4).map(Number);
-  if (![N, r, p].every(Number.isInteger) || N < 2 || (N & (N - 1)) !== 0 || N > 1 << 20 || r < 1 || r > 32 || p < 1 || p > 16) return null;
+  if (![N, r, p].every(Number.isInteger) || N < 2 || (N & (N - 1)) !== 0 || N > 1 << 16 || r < 1 || r > 16 || p < 1 || p > 4) return null;
+  if (128 * N * r > 32 * 1024 * 1024) return null;
   const salt = Buffer.from(parts[4], 'base64');
   const key = Buffer.from(parts[5], 'base64');
   if (!salt.length || !key.length) return null;
@@ -147,8 +169,12 @@ function parseHash(stored) {
 async function verifyPassword(password, stored) {
   const h = parseHash(stored);
   if (!h) return false;
-  const key = await scryptAsync(password, h.salt, { N: h.N, r: h.r, p: h.p, keylen: h.key.length });
-  return crypto.timingSafeEqual(key, h.key);
+  try {
+    const key = await scryptAsync(password, h.salt, { N: h.N, r: h.r, p: h.p, keylen: h.key.length });
+    return crypto.timingSafeEqual(key, h.key);
+  } catch (e) {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------- state
@@ -169,6 +195,10 @@ function emptyState() {
     splitIds: new Set(),
     settlements: [],
     settlementIds: new Set(),
+    auths: [],             // creation order
+    authsById: new Map(),
+    openAuths: new Map(),  // payer id -> Set of open authorizations
+    ttl: DEFAULT_TTL,
     idem: new Map(),       // user \n path \n key -> { hash, status, body }
     seq: 0,
   };
@@ -195,6 +225,72 @@ function addRequest(st, r) {
   st.requestsById.set(r.id, r);
 }
 
+function addAuth(st, a) {
+  st.auths.push(a);
+  st.authsById.set(a.id, a);
+  if (a.status === 'open') {
+    if (!st.openAuths.has(a.from)) st.openAuths.set(a.from, new Set());
+    st.openAuths.get(a.from).add(a);
+  }
+}
+
+function closeAuth(a, status) {
+  a.status = status;
+  const set = state.openAuths.get(a.from);
+  if (set) set.delete(a);
+}
+
+// An open authorization whose deadline has passed is expired, whether or not
+// any request happened at the deadline.
+function refreshAuth(a, now = Date.now()) {
+  if (a.status === 'open' && now >= a.expiresMs) closeAuth(a, 'expired');
+  return a;
+}
+
+function remainingOf(a) {
+  return a.status === 'open' ? a.amount - a.captured : 0;
+}
+
+function heldOf(user) {
+  const set = state.openAuths.get(user.id);
+  if (!set) return 0;
+  const now = Date.now();
+  let held = 0;
+  for (const a of [...set]) {
+    refreshAuth(a, now);
+    held += remainingOf(a);
+  }
+  return held;
+}
+
+function availableOf(user) {
+  return user.balance - heldOf(user);
+}
+
+function authView(a) {
+  refreshAuth(a);
+  const from = state.users.get(a.from);
+  const to = state.users.get(a.to);
+  return {
+    authorization_id: a.id,
+    from_user_id: a.from,
+    from_handle: from.handle,
+    to_user_id: a.to,
+    to_handle: to.handle,
+    amount: a.amount,
+    captured_amount: a.captured,
+    remaining_amount: remainingOf(a),
+    currency: state.currency,
+    note: a.note,
+    visibility: a.visibility,
+    status: a.status,
+    expires_at: a.expires_at,
+    payment_id: a.payment_ids.length ? a.payment_ids[a.payment_ids.length - 1] : null,
+    payment_ids: a.payment_ids.slice(),
+    created_at: a.created_at,
+  };
+}
+
 function paymentView(p) {
   const from = state.users.get(p.from);
   const to = state.users.get(p.to);
@@ -209,6 +305,7 @@ function paymentView(p) {
     note: p.note,
     visibility: p.visibility,
     request_id: p.request_id,
+    authorization_id: p.authorization_id || null,
     settlement_id: p.settlement_id,
     created_at: p.created_at,
   };
@@ -232,9 +329,9 @@ function requestView(r) {
   };
 }
 
-function issueToken(userId) {
+function issueToken(userId, st = state) {
   const token = crypto.randomBytes(24).toString('base64url');
-  state.tokens.set(token, userId);
+  st.tokens.set(token, userId);
   return token;
 }
 
@@ -313,6 +410,55 @@ async function buildFromFixture(fx) {
     const u = st.users.get(id);
     if (u) u.operator = true;
   }
+  if (has(fx, 'authorization_ttl_seconds')) {
+    const ttl = fx.authorization_ttl_seconds;
+    if (typeof ttl !== 'number' || !Number.isInteger(ttl) || ttl < 1 || ttl > 1e12) {
+      throw invalid('authorization_ttl_seconds must be a positive integer');
+    }
+    st.ttl = ttl;
+  }
+  const auths = has(fx, 'authorizations') && fx.authorizations !== null ? fx.authorizations : [];
+  if (!Array.isArray(auths)) throw invalid('authorizations must be an array');
+  const now = Date.now();
+  const holds = new Map();
+  for (const a of auths) {
+    if (!isObject(a)) throw invalid('authorization must be an object');
+    if (typeof a.id !== 'string' || !a.id || a.id.length > 64) throw invalid('authorization.id is invalid');
+    if (st.authsById.has(a.id)) throw invalid('duplicate authorization id');
+    if (!st.users.has(a.from_user_id) || !st.users.has(a.to_user_id)) throw invalid('authorization user unknown');
+    if (a.from_user_id === a.to_user_id) throw invalid('authorization pays its own payer');
+    if (!isExactInt(a.amount) || a.amount < 1) throw invalid('authorization.amount is invalid');
+    const status = has(a, 'status') ? a.status : 'open';
+    if (!AUTH_STATUSES.includes(status)) throw invalid('authorization.status is invalid');
+    let expiresMs = now + st.ttl * 1000;
+    if (has(a, 'expires_at')) {
+      expiresMs = parseStamp(a.expires_at);
+      if (expiresMs === null) throw invalid('authorization.expires_at must be an RFC 3339 timestamp');
+    } else if (status === 'open') {
+      throw invalid('an open authorization needs expires_at');
+    }
+    let captured = 0;
+    if (has(a, 'captured_amount') && a.captured_amount !== null) {
+      if (!isExactInt(a.captured_amount) || a.captured_amount < 0 || a.captured_amount > a.amount) {
+        throw invalid('authorization.captured_amount is invalid');
+      }
+      captured = a.captured_amount;
+    }
+    const paymentIds = [];
+    if (Array.isArray(a.payment_ids) && a.payment_ids.every((x) => typeof x === 'string')) paymentIds.push(...a.payment_ids);
+    else if (typeof a.payment_id === 'string') paymentIds.push(a.payment_id);
+    const auth = {
+      id: a.id, from: a.from_user_id, to: a.to_user_id, amount: a.amount, captured,
+      note: checkNote(a), visibility: checkVisibility(a), status,
+      expiresMs, expires_at: stampOf(expiresMs), created_at: stamp, payment_ids: paymentIds,
+    };
+    if (auth.status === 'open' && now >= expiresMs) auth.status = 'expired';
+    if (auth.status === 'open') holds.set(auth.from, (holds.get(auth.from) || 0) + auth.amount - auth.captured);
+    addAuth(st, auth);
+  }
+  for (const [uid, held] of holds) {
+    if (held > st.users.get(uid).balance) throw invalid('seeded open holds exceed the payer balance');
+  }
   const hashes = await Promise.all(pending.map(([, pw]) => hashPassword(pw)));
   pending.forEach(([user], i) => { user.hash = hashes[i]; });
   return st;
@@ -334,12 +480,19 @@ function exportState() {
     track: 'pocketful',
     format_version: 1,
     state: {
-      service: 'pocketful-stage-1',
+      service: SERVICE_STAGE2,
       currency: state.currency,
       minor_units: state.minor_units,
+      authorization_ttl_seconds: state.ttl,
+      authorizations: state.auths.map((a) => {
+        refreshAuth(a);
+        return { id: a.id, from: a.from, to: a.to, amount: a.amount, captured: a.captured, note: a.note,
+          visibility: a.visibility, status: a.status, expires_at: a.expires_at, created_at: a.created_at,
+          payment_ids: a.payment_ids.slice() };
+      }),
       users,
       tokens,
-      payments: state.payments.map((p) => ({ ...p })),
+      payments: state.payments.map((p) => ({ ...p, authorization_id: p.authorization_id || null })),
       requests: state.requests.map((r) => ({ ...r })),
       splits: deepCopy(state.splits),
       settlements: deepCopy(state.settlements),
@@ -355,7 +508,10 @@ function importState(doc) {
   if (doc.format_version !== 1) throw invalid('format_version must be 1');
   const s = doc.state;
   const bad = (m) => invalid('invalid state: ' + m);
-  if (!isObject(s) || s.service !== 'pocketful-stage-1') throw bad('not a state of this service');
+  if (!isObject(s) || (s.service !== SERVICE_STAGE1 && s.service !== SERVICE_STAGE2)) throw bad('not a state of this service');
+  const v2 = s.service === SERVICE_STAGE2;
+  if (v2 && (!Array.isArray(s.authorizations) || !Number.isSafeInteger(s.authorization_ttl_seconds)
+    || s.authorization_ttl_seconds < 1)) throw bad('authorizations');
   if (typeof s.currency !== 'string' || ![0, 2, 3].includes(s.minor_units)) throw bad('currency');
   for (const f of ['users', 'tokens', 'payments', 'requests', 'splits', 'settlements', 'idempotency']) {
     if (!Array.isArray(s[f])) throw bad(f);
@@ -365,6 +521,7 @@ function importState(doc) {
   st.currency = s.currency;
   st.minor_units = s.minor_units;
   st.seq = s.seq;
+  if (v2) st.ttl = s.authorization_ttl_seconds;
   const str = (v) => typeof v === 'string';
   const optStr = (v) => v === null || typeof v === 'string';
   for (const u of s.users) {
@@ -384,9 +541,11 @@ function importState(doc) {
   for (const p of s.payments) {
     if (!isObject(p) || !str(p.id) || st.paymentsById.has(p.id) || !st.users.has(p.from) || !st.users.has(p.to)
       || !isExactInt(p.amount) || !str(p.note) || !['public', 'private'].includes(p.visibility)
-      || !optStr(p.request_id) || !optStr(p.settlement_id) || !str(p.created_at)) throw bad('payment');
+      || !optStr(p.request_id) || !optStr(p.settlement_id) || !str(p.created_at)
+      || (has(p, 'authorization_id') && !optStr(p.authorization_id))) throw bad('payment');
     addPayment(st, { id: p.id, from: p.from, to: p.to, amount: p.amount, note: p.note,
-      visibility: p.visibility, request_id: p.request_id, settlement_id: p.settlement_id, created_at: p.created_at });
+      visibility: p.visibility, request_id: p.request_id, authorization_id: p.authorization_id || null,
+      settlement_id: p.settlement_id, created_at: p.created_at });
   }
   for (const r of s.requests) {
     if (!isObject(r) || !str(r.id) || st.requestsById.has(r.id) || !st.users.has(r.requester) || !st.users.has(r.payer)
@@ -404,6 +563,23 @@ function importState(doc) {
     if (!isObject(se) || !str(se.id) || st.settlementIds.has(se.id)) throw bad('settlement');
     st.settlements.push(se);
     st.settlementIds.add(se.id);
+  }
+  const held = new Map();
+  for (const a of v2 ? s.authorizations : []) {
+    const expiresMs = isObject(a) ? parseStamp(a.expires_at) : null;
+    if (!isObject(a) || !str(a.id) || st.authsById.has(a.id) || !st.users.has(a.from) || !st.users.has(a.to)
+      || !isExactInt(a.amount) || a.amount < 1 || !isExactInt(a.captured) || a.captured < 0 || a.captured > a.amount
+      || !str(a.note) || !['public', 'private'].includes(a.visibility) || !AUTH_STATUSES.includes(a.status)
+      || expiresMs === null || !str(a.created_at) || !Array.isArray(a.payment_ids) || !a.payment_ids.every(str)) {
+      throw bad('authorization');
+    }
+    if (a.status === 'open') held.set(a.from, (held.get(a.from) || 0) + a.amount - a.captured);
+    addAuth(st, { id: a.id, from: a.from, to: a.to, amount: a.amount, captured: a.captured, note: a.note,
+      visibility: a.visibility, status: a.status, expiresMs, expires_at: a.expires_at, created_at: a.created_at,
+      payment_ids: a.payment_ids.slice() });
+  }
+  for (const [uid, h] of held) {
+    if (h > st.users.get(uid).balance) throw bad('holds exceed a balance');
   }
   for (const e of s.idempotency) {
     if (!isObject(e) || !str(e.scope) || !str(e.hash) || ![201].includes(e.status) || !isObject(e.body)) throw bad('idempotency');
@@ -547,11 +723,14 @@ function userByHandle(handle) {
 
 // ---------------------------------------------------------------- operations
 
-function createPayment(from, to, amount, note, visibility, requestId, settlementId, createdAt) {
+function createPayment(from, to, amount, note, visibility, links = {}) {
   const p = {
     id: nextId('pay_', (id) => state.paymentsById.has(id)),
     from: from.id, to: to.id, amount, note, visibility,
-    request_id: requestId, settlement_id: settlementId, created_at: createdAt || nowStamp(),
+    request_id: links.request_id || null,
+    authorization_id: links.authorization_id || null,
+    settlement_id: links.settlement_id || null,
+    created_at: links.created_at || nowStamp(),
   };
   from.balance -= amount;
   to.balance += amount;
@@ -567,8 +746,8 @@ function opPayment(user, body) {
   const to = userByHandle(handle);
   if (!to) throw notFound('no user has that handle');
   if (to.id === user.id) throw new ApiError(422, 'self_payment', 'cannot pay yourself');
-  if (user.balance < amount) throw new ApiError(409, 'insufficient_funds', 'balance is too low');
-  return paymentView(createPayment(user, to, amount, note, visibility, null, null));
+  if (availableOf(user) < amount) throw new ApiError(409, 'insufficient_funds', 'available balance is too low');
+  return paymentView(createPayment(user, to, amount, note, visibility));
 }
 
 function opRequest(user, body) {
@@ -593,9 +772,9 @@ function opPayRequest(user, requestId, body) {
   if (!r) throw notFound('no such request');
   if (r.payer !== user.id) throw forbidden('only the payer may pay this request');
   if (r.status !== 'pending') throw new ApiError(409, 'request_not_pending', 'request is ' + r.status);
-  if (user.balance < r.amount) throw new ApiError(409, 'insufficient_funds', 'balance is too low');
+  if (availableOf(user) < r.amount) throw new ApiError(409, 'insufficient_funds', 'available balance is too low');
   const to = state.users.get(r.requester);
-  const p = createPayment(user, to, r.amount, r.note, visibility, r.id, null);
+  const p = createPayment(user, to, r.amount, r.note, visibility, { request_id: r.id });
   r.status = 'paid';
   r.payment_id = p.id;
   return paymentView(p);
@@ -669,16 +848,103 @@ function opSettlement(user, body) {
     net.set(e.to.id, (net.get(e.to.id) || 0) + e.amount);
   }
   for (const [uid, delta] of net) {
-    if (state.users.get(uid).balance + delta < 0) {
+    if (availableOf(state.users.get(uid)) + delta < 0) {
       throw new ApiError(409, 'insufficient_funds', 'the settlement is not affordable');
     }
   }
   const id = nextId('st_', (x) => state.settlementIds.has(x));
   const committedAt = nowStamp();
-  const payments = entries.map((e) => createPayment(e.from, e.to, e.amount, e.note, e.visibility, null, id, committedAt));
+  const payments = entries.map((e) => createPayment(e.from, e.to, e.amount, e.note, e.visibility,
+    { settlement_id: id, created_at: committedAt }));
   state.settlements.push({ id, operator: user.id, committed_at: committedAt, payment_ids: payments.map((p) => p.id) });
   state.settlementIds.add(id);
   return { settlement_id: id, committed_at: committedAt, payments: payments.map(paymentView) };
+}
+
+function opAuthorize(user, body) {
+  const handle = requireString(body, 'to_handle');
+  const amount = checkAmount(body);
+  const note = checkNote(body);
+  const visibility = checkVisibility(body);
+  const to = userByHandle(handle);
+  if (!to) throw notFound('no user has that handle');
+  if (to.id === user.id) throw new ApiError(422, 'self_payment', 'cannot authorize a payment to yourself');
+  if (availableOf(user) < amount) throw new ApiError(409, 'insufficient_funds', 'available balance is too low');
+  const createdAt = nowStamp();
+  const expiresMs = Date.parse(createdAt) + state.ttl * 1000;
+  const a = {
+    id: nextId('auth_', (x) => state.authsById.has(x)),
+    from: user.id, to: to.id, amount, captured: 0, note, visibility, status: 'open',
+    expiresMs, expires_at: stampOf(expiresMs), created_at: createdAt, payment_ids: [],
+  };
+  addAuth(state, a);
+  return authView(a);
+}
+
+function opCapture(user, authId, body) {
+  let final = true;
+  if (has(body, 'final')) {
+    if (typeof body.final !== 'boolean') throw malformed('final must be a boolean');
+    final = body.final;
+  }
+  let amount = null;
+  if (has(body, 'amount')) {
+    const v = body.amount;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 1) throw invalid('amount must be a positive integer');
+    amount = v;
+  }
+  const a = state.authsById.get(authId);
+  if (!a) throw notFound('no such authorization');
+  if (a.to !== user.id) throw forbidden('only the receiver may capture this authorization');
+  refreshAuth(a);
+  if (a.status === 'expired') throw new ApiError(409, 'authorization_expired', 'the authorization has expired');
+  if (a.status !== 'open') throw new ApiError(409, 'authorization_not_open', 'the authorization is ' + a.status);
+  const remaining = remainingOf(a);
+  if (amount === null) amount = remaining;
+  if (amount > remaining) {
+    throw new ApiError(422, 'capture_exceeds_authorization', 'amount is above the uncaptured remainder');
+  }
+  const payer = state.users.get(a.from);
+  const p = createPayment(payer, user, amount, a.note, a.visibility, { authorization_id: a.id });
+  a.captured += amount;
+  a.payment_ids.push(p.id);
+  if (final || a.captured === a.amount) closeAuth(a, 'captured');
+  return paymentView(p);
+}
+
+function opVoid(user, authId) {
+  const a = state.authsById.get(authId);
+  if (!a) throw notFound('no such authorization');
+  if (a.from !== user.id) throw forbidden('only the payer may void this authorization');
+  refreshAuth(a);
+  if (a.status === 'open') closeAuth(a, 'voided');
+  else if (a.status !== 'voided') throw new ApiError(409, 'authorization_not_open', 'the authorization is ' + a.status);
+  return authView(a);
+}
+
+function listAuthorizations(user, url) {
+  const q = url.searchParams;
+  let direction = null;
+  let status = null;
+  if (q.has('direction')) {
+    direction = q.get('direction');
+    if (direction !== 'incoming' && direction !== 'outgoing') throw invalid('direction must be incoming or outgoing');
+  }
+  if (q.has('status')) {
+    status = q.get('status');
+    if (!AUTH_STATUSES.includes(status)) throw invalid('unknown status');
+  }
+  const { limit, offset } = pageParams(url);
+  const now = Date.now();
+  const mine = state.auths.filter((a) => {
+    if (a.from !== user.id && a.to !== user.id) return false;
+    if (direction === 'outgoing' && a.from !== user.id) return false;
+    if (direction === 'incoming' && a.to !== user.id) return false;
+    refreshAuth(a, now);
+    return status === null || a.status === status;
+  });
+  const { out, hasMore } = pageNewestFirst(mine, limit, offset);
+  return { authorizations: out.map(authView), has_more: hasMore };
 }
 
 function opDecline(user, requestId) {
@@ -748,20 +1014,28 @@ async function signup(raw) {
   if (!validEmail(email)) throw invalid('email must look like local@domain');
   if (codePoints(password) < 8) throw invalid('password must be at least 8 characters');
   const handle = deriveHandle(email);
+  // The signup takes effect in the state that was current when it started. If a
+  // reset or import replaces that state while the password is hashed, the
+  // signup is ordered before the replacement and is discarded with it.
+  const target = state;
   const conflicts = () => {
-    if (state.byEmail.has(emailKey(email))) throw new ApiError(409, 'email_taken', 'email is already registered');
-    if (state.byHandle.has(handle)) throw new ApiError(409, 'handle_taken', 'the handle derived from this email is taken');
+    if (target.byEmail.has(emailKey(email))) throw new ApiError(409, 'email_taken', 'email is already registered');
+    if (target.byHandle.has(handle)) throw new ApiError(409, 'handle_taken', 'the handle derived from this email is taken');
   };
   conflicts();
   const hash = await hashPassword(password);
-  // Concurrent signups (or a reset) may have changed the state while hashing.
+  // Concurrent signups may have claimed the email or handle while hashing.
   conflicts();
-  const id = nextId('u_', (x) => state.users.has(x));
+  let id;
+  do {
+    target.seq += 1;
+    id = 'u_' + target.seq;
+  } while (target.users.has(id));
   const user = { id, email, hash, display_name: displayName, handle, balance: 0, operator: false };
-  state.users.set(id, user);
-  state.byEmail.set(emailKey(email), id);
-  state.byHandle.set(handle, id);
-  return { user_id: id, display_name: displayName, token: issueToken(id) };
+  target.users.set(id, user);
+  target.byEmail.set(emailKey(email), id);
+  target.byHandle.set(handle, id);
+  return { user_id: id, display_name: displayName, token: issueToken(id, target) };
 }
 
 async function login(raw) {
@@ -773,11 +1047,47 @@ async function login(raw) {
   if (!user) throw unauth;
   const target = state;
   const ok = await verifyPassword(body.password, user.hash);
-  if (!ok || state !== target || state.users.get(uid) !== user) throw unauth;
-  return { user_id: user.id, display_name: user.display_name, token: issueToken(user.id) };
+  if (!ok) throw unauth;
+  // Like signup, a login that started before a reset or import belongs to the old state.
+  return { user_id: user.id, display_name: user.display_name, token: issueToken(user.id, target) };
 }
 
 // ---------------------------------------------------------------- routing
+
+const UI_ROUTES = new Set(['/', '/requests', '/split', '/signup', '/login', '/authorizations']);
+const SHARED_ROUTES = new Set(['/requests', '/authorizations']);
+
+// A browser navigation asks for text/html; API clients (no Accept, */*, JSON) get JSON.
+function wantsHtml(req) {
+  const accept = req.headers.accept;
+  if (typeof accept !== 'string') return false;
+  return accept.split(',').some((part) => {
+    const [type, ...params] = part.trim().split(';').map((x) => x.trim().toLowerCase());
+    if (type !== 'text/html') return false;
+    const q = params.find((x) => x.startsWith('q='));
+    return !q || Number(q.slice(2)) > 0;
+  });
+}
+
+function sendStatic(res, status, type, body) {
+  res.writeHead(status, {
+    'Content-Type': type,
+    'Content-Length': Buffer.byteLength(body),
+    'Cache-Control': 'no-cache',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  res.end(body);
+}
+
+const API_METHODS = {
+  '/me': ['GET'],
+  '/payments': ['POST'],
+  '/requests': ['GET', 'POST'],
+  '/splits': ['POST'],
+  '/activity': ['GET'],
+  '/settlements': ['POST'],
+  '/authorizations': ['GET', 'POST'],
+};
 
 async function route(req, res) {
   const url = new URL(req.url, 'http://localhost');
@@ -791,6 +1101,14 @@ async function route(req, res) {
   if (path === '/health') {
     if (method !== 'GET') throw new ApiError(405, 'method_not_allowed', 'method not allowed');
     return send(res, 200, { status: 'ok' });
+  }
+
+  if (method === 'GET' || method === 'HEAD') {
+    const asset = ui.asset(path);
+    if (asset) return sendStatic(res, 200, asset.type, asset.body);
+    if (UI_ROUTES.has(path) && (!SHARED_ROUTES.has(path) || wantsHtml(req))) {
+      return sendStatic(res, 200, 'text/html; charset=utf-8', ui.page());
+    }
   }
 
   const raw = method === 'POST' || method === 'PUT' || method === 'PATCH' ? await readBody(req) : '';
@@ -808,39 +1126,40 @@ async function route(req, res) {
   if (path === '/auth/signup' && method === 'POST') return send(res, 201, await signup(raw));
   if (path === '/auth/login' && method === 'POST') return send(res, 200, await login(raw));
 
-  const known = ['/me', '/payments', '/requests', '/splits', '/activity', '/settlements'];
   const isRequestAction = segs.length === 3 && segs[0] === 'requests' && segs[1] !== ''
     && ['pay', 'decline', 'cancel'].includes(segs[2]);
-  if (!known.includes(path) && !isRequestAction) throw notFound('no such endpoint');
-
-  const allowed = {
-    '/me': 'GET', '/payments': 'POST', '/splits': 'POST', '/activity': 'GET', '/settlements': 'POST',
-  };
-  if (path !== '/requests' && !isRequestAction && allowed[path] !== method) {
-    throw new ApiError(405, 'method_not_allowed', 'method not allowed');
-  }
-  if ((path === '/requests' && method !== 'GET' && method !== 'POST') || (isRequestAction && method !== 'POST')) {
-    throw new ApiError(405, 'method_not_allowed', 'method not allowed');
-  }
+  const isAuthAction = segs.length === 3 && segs[0] === 'authorizations' && segs[1] !== ''
+    && ['capture', 'void'].includes(segs[2]);
+  if (!API_METHODS[path] && !isRequestAction && !isAuthAction) throw notFound('no such endpoint');
+  const methods = API_METHODS[path] || ['POST'];
+  if (!methods.includes(method)) throw new ApiError(405, 'method_not_allowed', 'method not allowed');
 
   const user = authenticate(req);
 
   if (path === '/me') {
+    const held = heldOf(user);
     return send(res, 200, {
       user_id: user.id, display_name: user.display_name, handle: user.handle,
-      balance: user.balance, currency: state.currency, minor_units: state.minor_units,
+      balance: user.balance, total: user.balance, available: user.balance - held, held,
+      currency: state.currency, minor_units: state.minor_units,
     });
   }
   if (path === '/activity') return send(res, 200, listActivity(user, url));
   if (path === '/requests' && method === 'GET') return send(res, 200, listRequests(user, url));
+  if (path === '/authorizations' && method === 'GET') return send(res, 200, listAuthorizations(user, url));
 
   let result;
   if (path === '/payments') result = idempotent(req, user, path, raw, (b) => opPayment(user, b));
   else if (path === '/requests') result = idempotent(req, user, path, raw, (b) => opRequest(user, b));
   else if (path === '/splits') result = idempotent(req, user, path, raw, (b) => opSplit(user, b));
+  else if (path === '/authorizations') result = idempotent(req, user, path, raw, (b) => opAuthorize(user, b));
   else if (path === '/settlements') {
     if (!user.operator) throw forbidden('settlements require an operator');
     result = idempotent(req, user, path, raw, (b) => opSettlement(user, b));
+  } else if (isAuthAction) {
+    const id = decode(segs[1]);
+    if (segs[2] === 'void') return send(res, 200, opVoid(user, id));
+    result = idempotent(req, user, '/authorizations/' + id + '/capture', raw, (b) => opCapture(user, id, b));
   } else {
     const id = decode(segs[1]);
     if (segs[2] === 'decline') return send(res, 200, opDecline(user, id));
@@ -865,5 +1184,5 @@ server.headersTimeout = 20000;
 
 const port = Number(process.env.PORT) || 8080;
 server.listen(port, '0.0.0.0', () => {
-  console.log('pocketful stage 1 listening on 0.0.0.0:' + port);
+  console.log('pocketful stage 2 listening on 0.0.0.0:' + port);
 });
