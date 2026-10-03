@@ -41,7 +41,8 @@ def test_seeded_created_at_order_and_defaults():
     ok(inst(by["p_004"]["created_at"]) > inst(by["p_003"]["created_at"]), "omitted created_at (reset time) is later than the seeded past instants")
     p5 = expect(ada.pay("cy", 5), 201).json
     ok(inst(p5["created_at"]) >= inst(by["p_004"]["created_at"]), "the reset-time payment comes before subsequently API-created payments")
-    eq([p["payment_id"] for p in ada.all_payments()][0], p5["payment_id"], "the new payment is newest")
+    ids = [p["payment_id"] for p in ada.all_payments()]
+    ok(p5["payment_id"] in ids[:2], "the new payment is among the newest (order inside one second is unspecified): %r" % ids)
     # statements agree with the fixture
     for u, want in ((bob, 550), (cy, 340 + 5)):
         eq(full_stmt(u)["closing"], want, "closing_balance equals the current balance (%s)" % u.handle)
