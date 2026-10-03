@@ -26,6 +26,11 @@
     return el;
   }
 
+  // replaceChildren() would render null as the text "null"; skip empty children.
+  function put(el, ...children) {
+    el.replaceChildren(...children.flat().filter((c) => c !== null && c !== undefined && c !== false));
+  }
+
   function newKey() {
     const b = new Uint8Array(16);
     crypto.getRandomValues(b);
@@ -156,9 +161,9 @@
   function slot(container) {
     return {
       set(testid, kind, text) {
-        container.replaceChildren(h('p', { 'data-testid': testid, class: 'notice notice-' + kind, role: kind === 'success' ? 'status' : 'alert' }, text));
+        put(container, h('p', { 'data-testid': testid, class: 'notice notice-' + kind, role: kind === 'success' ? 'status' : 'alert' }, text));
       },
-      clear() { container.replaceChildren(); },
+      clear() { put(container); },
     };
   }
 
@@ -177,7 +182,7 @@
     const header = h('header', { class: 'topbar' },
       h('div', { class: 'topbar-inner' }, h('a', { href: '/', class: 'brand' }, h('span', { class: 'brand-mark', 'aria-hidden': 'true' }, 'P'), 'Pocketful'), nav, who));
     const main = h('main', { class: 'page' });
-    app.replaceChildren(header, main);
+    put(app, header, main);
     return main;
   }
 
@@ -223,7 +228,7 @@
       card.append(h('p', { class: 'notice notice-info', role: 'status' }, 'You are signed in as @' + me.handle + '. ',
         isLogin ? 'Log in below to switch accounts.' : 'Create another account below, or go back to your ', isLogin ? null : h('a', { href: '/' }, 'wallet'), isLogin ? null : '.'));
     } else {
-      app.replaceChildren(h('main', { class: 'auth-page' },
+      put(app, h('main', { class: 'auth-page' },
         h('a', { href: '/', class: 'brand brand-large' }, h('span', { class: 'brand-mark', 'aria-hidden': 'true' }, 'P'), 'Pocketful'),
         card));
     }
@@ -294,16 +299,16 @@
           h('div', {}, h('dt', {}, 'Total balance'), h('dd', { class: 'total', 'data-testid': 'wallet-balance', 'data-amount': m.balance }, fmt(m.balance))),
           m.held > 0 ? h('div', { class: 'held-row' }, h('dt', {}, 'On hold'), h('dd', { class: 'held', 'data-testid': 'wallet-held', 'data-amount': m.held }, fmt(m.held))) : null),
       ];
-      numbers.replaceChildren(...parts);
+      put(numbers, ...parts);
     }
     function renderFeed(list) {
       if (!list.length) {
-        feedBody.replaceChildren(h('div', { class: 'empty', 'data-testid': 'empty-activity' },
+        put(feedBody, h('div', { class: 'empty', 'data-testid': 'empty-activity' },
           h('p', { class: 'empty-title' }, 'No activity yet'),
           h('p', { class: 'muted' }, 'Payments you send or receive, and public payments by others, show up here.')));
         return;
       }
-      feedBody.replaceChildren(h('ol', { class: 'list', 'data-testid': 'activity-list' }, list.map(feedItem)));
+      put(feedBody, h('ol', { class: 'list', 'data-testid': 'activity-list' }, list.map(feedItem)));
     }
     function feedItem(p) {
       const out = p.from_user_id === me.user_id;
@@ -330,11 +335,11 @@
       const m = await meP;
       if (mine !== generation) return;
       if (m && m.status === 200) renderNumbers(m.data);
-      else numbers.replaceChildren(h('p', { class: 'notice notice-error', role: 'alert' }, 'We could not load your balance. Use Refresh to try again.'));
+      else put(numbers, h('p', { class: 'notice notice-error', role: 'alert' }, 'We could not load your balance. Use Refresh to try again.'));
       const f = await feedP.catch(() => null);
       if (mine !== generation) return;
       if (f && f.status === 200) renderFeed(f.data);
-      else feedBody.replaceChildren(h('p', { class: 'notice notice-error', role: 'alert' }, 'We could not load your activity. Use Refresh to try again.'));
+      else put(feedBody, h('p', { class: 'notice notice-error', role: 'alert' }, 'We could not load your activity. Use Refresh to try again.'));
     }
     refreshBtn.addEventListener('click', () => { refresh(); });
 
@@ -455,12 +460,12 @@
       try { r = await getAll('/requests', 'requests'); } catch (e) { r = null; }
       if (mine !== generation) return;
       if (!r || r.status !== 200) {
-        body.replaceChildren(h('p', { class: 'notice notice-error', role: 'alert' }, 'We could not load your requests. Reload the page to try again.'));
+        put(body, h('p', { class: 'notice notice-error', role: 'alert' }, 'We could not load your requests. Reload the page to try again.'));
         return;
       }
       const incoming = r.data.filter((q) => q.payer_id === me.user_id);
       const outgoing = r.data.filter((q) => q.requester_id === me.user_id);
-      body.replaceChildren(
+      put(body, 
         !incoming.length && !outgoing.length ? h('div', { class: 'empty', 'data-testid': 'empty-requests' },
           h('p', { class: 'empty-title' }, 'No requests yet'),
           h('p', { class: 'muted' }, 'Ask someone for money from your ', h('a', { href: '/' }, 'wallet'), ', or ', h('a', { href: '/split' }, 'split a bill'), '.')) : null,
@@ -555,11 +560,11 @@
       const minor = parseAmount(amount.value);
       const list = parseHandles();
       if (minor === null || !list.length) {
-        preview.replaceChildren(h('p', { class: 'muted' }, 'Enter the total and the people to see each share.'));
+        put(preview, h('p', { class: 'muted' }, 'Enter the total and the people to see each share.'));
         return;
       }
       const s = shares(minor, list.length);
-      preview.replaceChildren(h('ul', { class: 'shares' }, list.map((hd, i) => h('li', {},
+      put(preview, h('ul', { class: 'shares' }, list.map((hd, i) => h('li', {},
         h('span', { class: 'share-who' }, '@' + hd, hd === me.handle ? h('span', { class: 'you' }, ' (you)') : null),
         h('span', { class: 'share-amount', 'data-testid': 'split-share-' + hd }, fmt(s[i]))))));
     }
@@ -641,19 +646,19 @@
       const m = await meP;
       if (mine !== generation) return;
       if (m && m.status === 200) {
-        availableLine.replaceChildren('Available to hold: ', h('strong', {}, fmt(m.data.available)));
+        put(availableLine, 'Available to hold: ', h('strong', {}, fmt(m.data.available)));
       }
       if (!r || r.status !== 200) {
-        listBody.replaceChildren(h('p', { class: 'notice notice-error', role: 'alert' }, 'We could not load your holds. Reload the page to try again.'));
+        put(listBody, h('p', { class: 'notice notice-error', role: 'alert' }, 'We could not load your holds. Reload the page to try again.'));
         return;
       }
       if (!r.data.length) {
-        listBody.replaceChildren(h('div', { class: 'empty', 'data-testid': 'empty-authorizations' },
+        put(listBody, h('div', { class: 'empty', 'data-testid': 'empty-authorizations' },
           h('p', { class: 'empty-title' }, 'No holds yet'),
           h('p', { class: 'muted' }, 'Holds you place, and holds others place for you, appear here.')));
         return;
       }
-      listBody.replaceChildren(h('ol', { class: 'list', 'data-testid': 'authorization-list' }, r.data.map(item)));
+      put(listBody, h('ol', { class: 'list', 'data-testid': 'authorization-list' }, r.data.map(item)));
     }
 
     function item(x) {
@@ -783,7 +788,7 @@
       r = null;
     }
     if (!r || r.status !== 200) {
-      app.replaceChildren(h('main', { class: 'auth-page' }, h('section', { class: 'auth-card' },
+      put(app, h('main', { class: 'auth-page' }, h('section', { class: 'auth-card' },
         h('h1', {}, 'We could not reach Pocketful'),
         h('p', { class: 'notice notice-error', role: 'alert' }, 'Check your connection, then reload the page.'))));
       return;
