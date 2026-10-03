@@ -1,7 +1,7 @@
 'use strict';
-// Pocketful stage 3: wallet, payments, requests, splits, settlements, payment
-// authorizations, bitemporal statements and payment corrections over HTTP, plus
-// the browser UI.
+// Pocketful stage 4: wallet, payments, requests, splits, settlements, payment
+// authorizations, bitemporal statements, payment corrections, refunds and
+// operator correction batches over HTTP, plus the browser UI.
 // All state lives in memory. Every state-changing step runs synchronously on the
 // event loop, so each operation is atomic with respect to every other request.
 
@@ -21,7 +21,7 @@ const DEFAULT_TTL = 600;
 const SERVICE_STAGE1 = 'pocketful-stage-1';
 const SERVICE_STAGE2 = 'pocketful-stage-2';
 const SERVICE_STAGE3 = 'pocketful-stage-3';
-const CLOCK_SKEW_US = 2e6;
+const SERVICE_STAGE4 = 'pocketful-stage-4';
 
 // ---------------------------------------------------------------- errors
 
@@ -51,6 +51,9 @@ function tick() {
   lastUs = Math.max(nowUs(), lastUs + 1);
   return lastUs;
 }
+
+// "Now" as the service sees it: never earlier than the last recorded event.
+const serviceNow = () => Math.max(nowUs(), lastUs);
 
 function observeUs(us) {
   if (us > lastUs && us <= nowUs() + 1e6) lastUs = us;
@@ -263,11 +266,16 @@ function indexUnder(map, key, value) {
 }
 
 // A payment's history: revision 1 is the payment as made; corrections append.
-function revision(n, amount, effUs, recUs, reason) {
-  return { revision: n, amount, effUs, effective_at: stampOf(effUs), recUs, recorded_at: stampOf(recUs), reason };
+function revision(n, amount, effUs, recUs, reason, batch = null) {
+  return { revision: n, amount, effUs, effective_at: stampOf(effUs), recUs, recorded_at: stampOf(recUs), reason, batch };
 }
 
 function addPayment(st, p) {
+  p.refunded = p.refunded || 0;
+  if (p.refund_of) {
+    const target = st.paymentsById.get(p.refund_of);
+    if (target) target.refunded = (target.refunded || 0) + p.amount;
+  }
   st.payments.push(p);
   st.paymentsById.set(p.id, p);
   indexUnder(st.userPayments, p.from, p);
@@ -365,6 +373,7 @@ function paymentView(p, amount = p.amount) {
     request_id: p.request_id,
     authorization_id: p.authorization_id || null,
     settlement_id: p.settlement_id,
+    refund_of: p.refund_of || null,
     created_at: p.created_at,
   };
 }
@@ -395,6 +404,7 @@ function revisionView(p, r) {
     effective_at: r.effective_at,
     recorded_at: r.recorded_at,
     reason: r.reason,
+    correction_batch_id: r.batch || null,
   };
 }
 
@@ -690,7 +700,7 @@ function exportState() {
     track: 'pocketful',
     format_version: 1,
     state: {
-      service: SERVICE_STAGE3,
+      service: SERVICE_STAGE4,
       currency: state.currency,
       minor_units: state.minor_units,
       authorization_ttl_seconds: state.ttl,
@@ -707,14 +717,16 @@ function exportState() {
       payments: state.payments.map((p) => ({
         id: p.id, from: p.from, to: p.to, amount: p.amount, note: p.note, visibility: p.visibility,
         request_id: p.request_id, authorization_id: p.authorization_id || null, settlement_id: p.settlement_id,
+        refund_of: p.refund_of || null,
         created_at: p.created_at,
         revisions: p.revs.map((r) => ({ revision: r.revision, amount: r.amount, effective_at: r.effective_at,
-          recorded_at: r.recorded_at, reason: r.reason })),
+          recorded_at: r.recorded_at, reason: r.reason, correction_batch_id: r.batch || null })),
       })),
       requests: state.requests.map((r) => ({ ...r })),
       splits: deepCopy(state.splits),
       settlements: deepCopy(state.settlements),
       idempotency: deepCopy(idem),
+      snapshots: [...state.snapshots].map(([token, snap]) => ({ token, user: snap.user, result: snap.result })),
       seq: state.seq,
     },
   };
@@ -729,11 +741,12 @@ function importState(doc) {
   if (doc.format_version !== 1) throw invalid('format_version must be 1');
   const s = doc.state;
   const bad = (m) => invalid('invalid state: ' + m);
-  if (!isObject(s) || ![SERVICE_STAGE1, SERVICE_STAGE2, SERVICE_STAGE3].includes(s.service)) {
+  if (!isObject(s) || ![SERVICE_STAGE1, SERVICE_STAGE2, SERVICE_STAGE3, SERVICE_STAGE4].includes(s.service)) {
     throw bad('not a state of this service');
   }
   const v1 = s.service === SERVICE_STAGE1;
-  const v3 = s.service === SERVICE_STAGE3;
+  // Stage-3 and stage-4 states carry revision histories, openings and hold lifecycles.
+  const v3 = s.service === SERVICE_STAGE3 || s.service === SERVICE_STAGE4;
   if (!v1 && (!Array.isArray(s.authorizations) || !Number.isSafeInteger(s.authorization_ttl_seconds)
     || s.authorization_ttl_seconds < 1)) throw bad('authorizations');
   if (typeof s.currency !== 'string' || ![0, 2, 3].includes(s.minor_units)) throw bad('currency');
@@ -771,7 +784,8 @@ function importState(doc) {
     if (!isObject(p) || !str(p.id) || seen.has(p.id) || !st.users.has(p.from) || !st.users.has(p.to)
       || !isExactInt(p.amount) || !str(p.note) || !['public', 'private'].includes(p.visibility)
       || !optStr(p.request_id) || !optStr(p.settlement_id) || createdUs === null
-      || (has(p, 'authorization_id') && !optStr(p.authorization_id))) throw bad('payment');
+      || (has(p, 'authorization_id') && !optStr(p.authorization_id))
+      || (has(p, 'refund_of') && !optStr(p.refund_of))) throw bad('payment');
     seen.add(p.id);
     let revs;
     if (v3) {
@@ -780,9 +794,9 @@ function importState(doc) {
         const effUs = isObject(r) ? parseInstant(r.effective_at) : null;
         const recUs = isObject(r) ? parseInstant(r.recorded_at) : null;
         if (effUs === null || recUs === null || r.revision !== i + 1 || !isExactInt(r.amount) || r.amount < 0
-          || !str(r.reason)) throw bad('revision');
+          || !str(r.reason) || (has(r, 'correction_batch_id') && !optStr(r.correction_batch_id))) throw bad('revision');
         return { revision: r.revision, amount: r.amount, effUs, effective_at: r.effective_at, recUs,
-          recorded_at: r.recorded_at, reason: r.reason };
+          recorded_at: r.recorded_at, reason: r.reason, batch: r.correction_batch_id || null };
       });
     } else {
       revs = [revision(1, p.amount, createdUs, createdUs, '')];
@@ -792,7 +806,7 @@ function importState(doc) {
     for (const r of revs) latest = Math.max(latest, r.recUs);
     payments.push({ id: p.id, from: p.from, to: p.to, amount: p.amount, note: p.note,
       visibility: p.visibility, request_id: p.request_id, authorization_id: p.authorization_id || null,
-      settlement_id: p.settlement_id, createdUs, created_at: p.created_at, revs });
+      settlement_id: p.settlement_id, refund_of: p.refund_of || null, createdUs, created_at: p.created_at, revs });
   }
   payments.sort((a, b) => a.createdUs - b.createdUs);
   for (const p of payments) {
@@ -875,6 +889,16 @@ function importState(doc) {
   for (const e of s.idempotency) {
     if (!isObject(e) || !str(e.scope) || !str(e.hash) || ![201].includes(e.status) || !isObject(e.body)) throw bad('idempotency');
     st.idem.set(e.scope, { hash: e.hash, status: e.status, body: e.body });
+  }
+  // Saved statements of the exported service keep paging their frozen entries.
+  if (has(s, 'snapshots')) {
+    if (!Array.isArray(s.snapshots)) throw bad('snapshots');
+    for (const sn of s.snapshots) {
+      if (!isObject(sn) || !str(sn.token) || !st.users.has(sn.user) || !isObject(sn.result)
+        || !isExactInt(sn.result.opening_balance) || !isExactInt(sn.result.closing_balance)
+        || !Array.isArray(sn.result.entries)) throw bad('snapshot');
+      st.snapshots.set(sn.token, { user: sn.user, result: sn.result });
+    }
   }
   observeUs(latest);
   return st;
@@ -1023,6 +1047,7 @@ function createPayment(from, to, amount, note, visibility, links = {}) {
     request_id: links.request_id || null,
     authorization_id: links.authorization_id || null,
     settlement_id: links.settlement_id || null,
+    refund_of: links.refund_of || null,
     createdUs,
     created_at: stampOf(createdUs),
     revs: [revision(1, amount, createdUs, createdUs, '')],
@@ -1315,7 +1340,7 @@ function meView(user, url) {
       currency: state.currency, minor_units: state.minor_units,
     };
   }
-  const now = nowUs();
+  const now = serviceNow();
   const asUs = asOf ? asOf.us : now;
   const knownUs = knownAt ? knownAt.us : null;
   const total = balanceAt(user, asUs, knownUs);
@@ -1383,9 +1408,8 @@ function listRevisions(user, paymentId) {
 
 const CORRECTION_FIELDS = ['expected_revision', 'amount', 'effective_at', 'reason'];
 
-function opCorrect(user, paymentId, body) {
-  const p = paymentFor(user, paymentId, false);
-  if (p.from !== user.id) throw forbidden('only the sender may correct this payment');
+// Field rules shared by single corrections and batch items.
+function correctionFields(body) {
   for (const f of CORRECTION_FIELDS) {
     if (!has(body, f)) throw invalid(f + ' is required');
   }
@@ -1399,36 +1423,129 @@ function opCorrect(user, paymentId, body) {
   }
   const effUs = parseInstant(body.effective_at);
   if (effUs === null) throw invalid('effective_at must be an RFC 3339 instant with an offset');
-  if (effUs > nowUs() + CLOCK_SKEW_US) throw invalid('effective_at must not be later than now');
+  if (effUs > serviceNow()) throw invalid('effective_at must not be later than now');
   const reason = body.reason;
   if (typeof reason !== 'string' || codePoints(reason) < 1 || codePoints(reason) > MAX_NOTE) {
     throw invalid('reason must be 1 to ' + MAX_NOTE + ' characters');
   }
-  if (p.settlement_id || p.authorization_id) {
-    throw new ApiError(422, 'linked_payment_immutable', 'settlement members and captures cannot be corrected');
+  return { expected, amount, effUs, reason };
+}
+
+// Revision-level checks once the payment and fields are known.
+function checkCorrectable(p, f, allowSettlement) {
+  if (p.authorization_id || p.refund_of || (p.settlement_id && !allowSettlement)) {
+    throw new ApiError(422, 'linked_payment_immutable', 'settlement members, captures and refunds cannot be corrected here');
   }
   const current = p.revs[p.revs.length - 1];
-  if (expected !== current.revision) {
-    throw new ApiError(409, 'stale_revision', 'the payment is at revision ' + current.revision);
+  if (f.expected !== current.revision) {
+    throw new ApiError(409, 'stale_revision', 'payment ' + p.id + ' is at revision ' + current.revision);
   }
+  if (f.amount < p.refunded) {
+    throw new ApiError(422, 'refund_exceeds_payment', 'payment ' + p.id + ' has already been refunded ' + p.refunded);
+  }
+}
+
+// Appends one revision per change in a single atomic step, after checking the
+// combined effect on current available funds and on every past boundary.
+function applyCorrections(changes, batchId) {
+  const net = new Map();
+  for (const c of changes) {
+    const diff = c.f.amount - c.p.revs[c.p.revs.length - 1].amount;
+    net.set(c.p.from, (net.get(c.p.from) || 0) - diff);
+    net.set(c.p.to, (net.get(c.p.to) || 0) + diff);
+    c.diff = diff;
+  }
+  for (const [uid, delta] of net) {
+    if (delta < 0 && availableOf(state.users.get(uid)) + delta < 0) {
+      throw new ApiError(409, 'insufficient_funds', 'a wallet cannot fund the correction now');
+    }
+  }
+  const recUs = tick();
+  for (const c of changes) {
+    c.rev = revision(c.p.revs[c.p.revs.length - 1].revision + 1, c.f.amount, c.f.effUs, recUs, c.f.reason, batchId);
+    c.p.revs.push(c.rev);
+  }
+  for (const uid of net.keys()) {
+    if (!historyIsSound(state.users.get(uid))) {
+      for (const c of changes) c.p.revs.pop();
+      throw new ApiError(409, 'historical_overdraft', 'the correction would overdraw a wallet in the past');
+    }
+  }
+  for (const c of changes) {
+    state.users.get(c.p.from).balance -= c.diff;
+    state.users.get(c.p.to).balance += c.diff;
+  }
+  return recUs;
+}
+
+function opCorrect(user, paymentId, body) {
+  const p = paymentFor(user, paymentId, false);
+  if (p.from !== user.id) throw forbidden('only the sender may correct this payment');
+  const f = correctionFields(body);
+  checkCorrectable(p, f, false);
+  const change = { p, f };
+  applyCorrections([change], null);
+  return revisionView(p, change.rev);
+}
+
+function opRefund(user, paymentId, body) {
+  const p = paymentFor(user, paymentId, false);
+  if (p.to !== user.id) throw forbidden('only the receiver may refund this payment');
+  const amount = checkAmount(body);
+  if (p.refund_of) throw new ApiError(422, 'invalid_refund_target', 'a refund cannot be refunded');
+  const cap = p.revs[p.revs.length - 1].amount;
+  if (p.refunded + amount > cap) {
+    throw new ApiError(422, 'refund_exceeds_payment', 'refunds would exceed the payment amount of ' + cap);
+  }
+  if (availableOf(user) < amount) throw new ApiError(409, 'insufficient_funds', 'available balance is too low');
   const sender = state.users.get(p.from);
-  const receiver = state.users.get(p.to);
-  const diff = amount - current.amount;
-  if (diff > 0 && availableOf(sender) < diff) {
-    throw new ApiError(409, 'insufficient_funds', 'the sender cannot fund the increase');
+  const r = createPayment(user, sender, amount, p.note, p.visibility, { refund_of: p.id });
+  return paymentView(r);
+}
+
+function opCorrectionBatch(user, body) {
+  if (!has(body, 'corrections') || !Array.isArray(body.corrections)) throw invalid('corrections must be an array');
+  const list = body.corrections;
+  if (list.length < 1 || list.length > 32) throw invalid('corrections must contain 1 to 32 items');
+  for (const it of list) {
+    if (!isObject(it)) throw invalid('every correction must be an object');
   }
-  if (diff < 0 && availableOf(receiver) < -diff) {
-    throw new ApiError(409, 'insufficient_funds', 'the receiver cannot fund the decrease');
+  const ids = list.map((it) => it.payment_id).filter((x) => typeof x === 'string');
+  if (new Set(ids).size !== ids.length) throw invalid('payment_ids must be distinct');
+  const changes = list.map((it) => {
+    if (!has(it, 'payment_id')) throw invalid('payment_id is required');
+    if (typeof it.payment_id !== 'string') throw invalid('payment_id must be a string');
+    const f = correctionFields(it);
+    const p = state.paymentsById.get(it.payment_id);
+    if (!p) throw notFound('no such payment: ' + it.payment_id);
+    checkCorrectable(p, f, true);
+    return { p, f };
+  });
+  // Settlement members are corrected together, at one effective instant.
+  const touched = new Map();
+  for (const c of changes) {
+    if (!c.p.settlement_id) continue;
+    if (!touched.has(c.p.settlement_id)) touched.set(c.p.settlement_id, []);
+    touched.get(c.p.settlement_id).push(c);
   }
-  const next = revision(current.revision + 1, amount, effUs, tick(), reason);
-  p.revs.push(next);
-  if (!historyIsSound(sender) || !historyIsSound(receiver)) {
-    p.revs.pop();
-    throw new ApiError(409, 'historical_overdraft', 'the correction would overdraw a wallet in the past');
+  for (const [sid, members] of touched) {
+    const all = state.payments.filter((p) => p.settlement_id === sid);
+    if (members.length !== all.length) {
+      throw new ApiError(422, 'incomplete_settlement', 'every member of settlement ' + sid + ' must be corrected together');
+    }
   }
-  sender.balance -= diff;
-  receiver.balance += diff;
-  return revisionView(p, next);
+  for (const members of touched.values()) {
+    if (members.some((c) => c.f.effUs !== members[0].f.effUs)) {
+      throw invalid('members of one settlement need the same effective_at');
+    }
+  }
+  const id = nextId('cb_', () => false);
+  const recUs = applyCorrections(changes, id);
+  return {
+    correction_batch_id: id,
+    recorded_at: stampOf(recUs),
+    revisions: changes.map((c) => revisionView(c.p, c.rev)),
+  };
 }
 
 // ---------------------------------------------------------------- auth endpoints
@@ -1524,6 +1641,7 @@ const API_METHODS = {
   '/settlements': ['POST'],
   '/authorizations': ['GET', 'POST'],
   '/statement': ['GET'],
+  '/correction-batches': ['POST'],
 };
 
 async function route(req, res) {
@@ -1566,7 +1684,7 @@ async function route(req, res) {
   const isRequestAction = segs.length === 3 && segs[0] === 'requests' && segs[1] !== ''
     && ['pay', 'decline', 'cancel'].includes(segs[2]);
   const isPaymentAction = segs.length === 3 && segs[0] === 'payments' && segs[1] !== ''
-    && ['corrections', 'revisions'].includes(segs[2]);
+    && ['corrections', 'revisions', 'refunds'].includes(segs[2]);
   const isAuthAction = segs.length === 3 && segs[0] === 'authorizations' && segs[1] !== ''
     && ['capture', 'void'].includes(segs[2]);
   if (!API_METHODS[path] && !isRequestAction && !isAuthAction && !isPaymentAction) throw notFound('no such endpoint');
@@ -1588,7 +1706,12 @@ async function route(req, res) {
   else if (path === '/splits') result = idempotent(req, user, path, raw, (b) => opSplit(user, b));
   else if (isPaymentAction) {
     const id = decode(segs[1]);
-    result = idempotent(req, user, '/payments/' + id + '/corrections', raw, (b) => opCorrect(user, id, b));
+    const action = segs[2];
+    result = idempotent(req, user, '/payments/' + id + '/' + action, raw,
+      (b) => (action === 'refunds' ? opRefund(user, id, b) : opCorrect(user, id, b)));
+  } else if (path === '/correction-batches') {
+    if (!user.operator) throw forbidden('correction batches require a settlement operator');
+    result = idempotent(req, user, path, raw, (b) => opCorrectionBatch(user, b));
   } else if (path === '/authorizations') result = idempotent(req, user, path, raw, (b) => opAuthorize(user, b));
   else if (path === '/settlements') {
     if (!user.operator) throw forbidden('settlements require an operator');
@@ -1621,5 +1744,5 @@ server.headersTimeout = 20000;
 
 const port = Number(process.env.PORT) || 8080;
 server.listen(port, '0.0.0.0', () => {
-  console.log('pocketful stage 3 listening on 0.0.0.0:' + port);
+  console.log('pocketful stage 4 listening on 0.0.0.0:' + port);
 });
