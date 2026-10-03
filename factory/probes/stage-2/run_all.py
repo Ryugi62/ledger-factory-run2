@@ -82,6 +82,7 @@ def main():
     ap.add_argument("--screenshots", default=os.environ.get("PROBE_SCREENSHOTS"))
     a = ap.parse_args()
     lib.set_base(a.base)
+    os.environ.setdefault("PROBE_STAGE_DIR", "stage-2")
     if a.screenshots:
         os.environ["PROBE_SCREENSHOTS"] = a.screenshots
     load(not a.no_stage1, not a.no_ui)

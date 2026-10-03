@@ -16,6 +16,9 @@ DOCKER="${DOCKER:-}"
 if [ -z "$DOCKER" ]; then
   if [ -x /Users/ryugi62/.local/bin/docker ]; then DOCKER=/Users/ryugi62/.local/bin/docker; else DOCKER=docker; fi
 fi
+CTX="${CONTEXT:-$REPO/stage-1}"
+[ -f "$CTX/Dockerfile" ] || CTX="$REPO"      # the product lives in stage-1/; fall back to the repo root
+export PROBE_STAGE_DIR="${PROBE_STAGE_DIR:-stage-1}"
 IMG="${IMAGE:-pocketful-stage1-probe}"
 OFFLINE=0; BUILD=1; EXTRA=()
 while [ $# -gt 0 ]; do
@@ -55,8 +58,8 @@ wait_healthy() {  # url seconds -> prints elapsed, returns 0/1
 }
 
 if [ "$BUILD" = 1 ]; then
-  echo "== docker build ($REPO)"
-  "$DOCKER" build -t "$IMG" "$REPO" || { echo "BUILD FAILED"; exit 1; }
+  echo "== docker build ($CTX)"
+  "$DOCKER" build -t "$IMG" "$CTX" || { echo "BUILD FAILED"; exit 1; }
 fi
 
 echo "== phase A: -e PORT=$PORT_A, 2 vCPU, 2 GiB, mapped to $HP_A"
@@ -86,7 +89,7 @@ if [ "$OFFLINE" = 1 ]; then
   else
     echo "outbound blocked as intended"
   fi
-  "$DOCKER" run --rm --network "$NET" -v "$HERE:/probes:ro" -v "$REPO:/repo:ro" -e PROBE_REPO=/repo "$PY_IMG" \
+  "$DOCKER" run --rm --network "$NET" -v "$HERE:/probes:ro" -v "$REPO:/repo:ro" -e PROBE_REPO=/repo -e PROBE_STAGE_DIR="$PROBE_STAGE_DIR" "$PY_IMG" \
       python /probes/run_all.py http://svc:8080 ${EXTRA[@]+"${EXTRA[@]}"} || fail=1
 fi
 

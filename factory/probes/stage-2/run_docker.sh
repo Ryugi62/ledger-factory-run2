@@ -16,6 +16,9 @@ DOCKER="${DOCKER:-}"
 if [ -z "$DOCKER" ]; then
   if [ -x /Users/ryugi62/.local/bin/docker ]; then DOCKER=/Users/ryugi62/.local/bin/docker; else DOCKER=docker; fi
 fi
+CTX="${CONTEXT:-$REPO/stage-2}"
+[ -f "$CTX/Dockerfile" ] || CTX="$REPO"      # the product lives in stage-2/; fall back to the repo root
+export PROBE_STAGE_DIR="${PROBE_STAGE_DIR:-stage-2}"
 IMG="${IMAGE:-pocketful-stage2-probe}"
 OFFLINE=0; BUILD=1; STAGE1_REF=""; EXTRA=(); NOUI=()
 while [ $# -gt 0 ]; do
@@ -53,8 +56,8 @@ wait_healthy() {  # url seconds
 }
 
 if [ "$BUILD" = 1 ]; then
-  echo "== docker build ($REPO)"
-  "$DOCKER" build -t "$IMG" "$REPO" || { echo "BUILD FAILED"; exit 1; }
+  echo "== docker build ($CTX)"
+  "$DOCKER" build -t "$IMG" "$CTX" || { echo "BUILD FAILED"; exit 1; }
 fi
 
 S1URL=""
@@ -62,7 +65,8 @@ if [ -n "$STAGE1_REF" ]; then
   TMP="$(mktemp -d)"
   echo "== stage-1 service from git ref $STAGE1_REF"
   git -C "$REPO" archive "$STAGE1_REF" | tar -x -C "$TMP" || { echo "cannot archive $STAGE1_REF"; exit 1; }
-  "$DOCKER" build -t "${IMG}-stage1" "$TMP" || { echo "STAGE-1 BUILD FAILED"; exit 1; }
+  S1CTX="$TMP/stage-1"; [ -f "$S1CTX/Dockerfile" ] || S1CTX="$TMP"
+  "$DOCKER" build -t "${IMG}-stage1" "$S1CTX" || { echo "STAGE-1 BUILD FAILED"; exit 1; }
   "$DOCKER" run -d --name "pf2-s1-$SUFFIX" -p "127.0.0.1:$HP_S1:8080" "${IMG}-stage1" >/dev/null && NAMES+=("pf2-s1-$SUFFIX")
   if wait_healthy "http://127.0.0.1:$HP_S1" 60 >/dev/null; then S1URL="http://127.0.0.1:$HP_S1"; echo "stage-1 service up at $S1URL"; else echo "FAIL: stage-1 service not healthy"; fail=1; fi
 fi
@@ -89,7 +93,7 @@ if [ "$OFFLINE" = 1 ]; then
   if "$DOCKER" run --rm --network "$NET" "$PY_IMG" python -c "import urllib.request;urllib.request.urlopen('http://1.1.1.1',timeout=4)" >/dev/null 2>&1; then
     echo "WARNING: network is not actually offline"; fail=1
   else echo "outbound blocked as intended"; fi
-  "$DOCKER" run --rm --network "$NET" -v "$REPO/factory/probes:/probes:ro" -v "$REPO:/repo:ro" -e PROBE_REPO=/repo "$PY_IMG" \
+  "$DOCKER" run --rm --network "$NET" -v "$REPO/factory/probes:/probes:ro" -v "$REPO:/repo:ro" -e PROBE_REPO=/repo -e PROBE_STAGE_DIR="$PROBE_STAGE_DIR" "$PY_IMG" \
       python /probes/stage-2/run_all.py http://svc:8080 --no-ui ${EXTRA[@]+"${EXTRA[@]}"} || fail=1
 fi
 

@@ -27,11 +27,20 @@ def test_ready_means_ready():
 
 @test("S1-010")
 def test_delivery_files():
+    # the product of a stage lives in <repo>/stage-N/ (PROBE_STAGE_DIR, default stage-1); the repo root is accepted as a fallback
+    stage_dir = os.environ.get("PROBE_STAGE_DIR", "stage-1")
+    roots = [os.path.join(REPO, stage_dir), REPO]
+    where = None
+    for r in roots:
+        if os.path.isfile(os.path.join(r, "Dockerfile")):
+            where = r
+            break
+    ok(where, "no Dockerfile in %s or %s" % (roots[0], roots[1]))
     for name in ("Dockerfile", "RUN.md"):
-        p = os.path.join(REPO, name)
-        ok(os.path.isfile(p), "%s missing at the repository root (%s)" % (name, p))
+        p = os.path.join(where, name)
+        ok(os.path.isfile(p), "%s missing next to the Dockerfile (%s)" % (name, p))
         ok(os.path.getsize(p) > 0, "%s is empty" % name)
-    run_md = open(os.path.join(REPO, "RUN.md"), encoding="utf-8", errors="replace").read()
+    run_md = open(os.path.join(where, "RUN.md"), encoding="utf-8", errors="replace").read()
     ok("docker" in run_md.lower(), "RUN.md should contain the docker command that builds and starts the service")
     ok("PORT" in run_md, "RUN.md should show how the PORT variable is passed")
 
