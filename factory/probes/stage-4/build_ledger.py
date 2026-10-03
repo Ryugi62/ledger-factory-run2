@@ -126,7 +126,7 @@ def main():
         ("S4-027", "Members of a settlement need the same instant to the second as spelled in the request (offsets may differ); the probe uses a one-second difference as the violation."),
         ("S4-036", "Revisions made by single corrections carry no `correction_batch_id` or null; both are accepted."),
         ("S4-034", "Each element of `revisions` has the single-correction fields plus correction_batch_id; recorded_at is identical across the batch and equals the top-level recorded_at."),
-        ("S4-045", "Needs running services of stages 1-3 (`PROBE_STAGE1_BASE_URL`, `PROBE_STAGE2_BASE_URL`, `PROBE_STAGE3_BASE_URL`; `run_docker.sh --stage1-ref/--stage2-ref/--stage3-ref` builds them from git refs); SKIP otherwise. For a stage-3 export, snapshot tokens issued by the old service must keep paging their frozen entries after the import; stage-1/2 exports have no snapshots."),
+        ("S4-045", "Needs running services of stages 1-3 (`PROBE_STAGE1_BASE_URL`, `PROBE_STAGE2_BASE_URL`, `PROBE_STAGE3_BASE_URL`; `run_docker.sh --stage1-ref/--stage2-ref/--stage3-ref` builds them from git refs); SKIP otherwise. KNOWN GAP: stage-3 exports carried no snapshots, so tokens issued by an old stage-3 service cannot be reconstructed; the probe notes an unknown (404) token as a known gap and only requires frozen entries when the token pages. Stage-4 exports must retain snapshots (S4-049)."),
         ("S4-049", "Snapshot tokens survive export -> reset -> import within the same service (stage 4 retains snapshots in exports)."),
     ]:
         w("- **%s** — %s" % (rid, text))

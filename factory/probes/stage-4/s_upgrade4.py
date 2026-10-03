@@ -200,8 +200,15 @@ def test_exports_of_stages_1_to_3_are_accepted():
             reset(fixture([fx_user("zed", 123)]))
             expect(http("POST", "/_test/import", body=export_), 204, msg="a stage-3 export must be accepted")
             up3.verify3(c, label)
+            # KNOWN GAP (coordinator decision): a stage-3 export never contained the snapshot tokens, so a stage-4 service cannot
+            # reconstruct them. If the tokens do page after the import they must page the same frozen entries; if they are
+            # unknown (404) it is reported, not failed.
             for h in snaps:
-                eq(pages_all(c.w[h], snaps[h]["snapshot"]), frozen[h], "%s: saved statement tokens of %s are retained and page the same entries" % (label, h))
+                r_ = stmt_raw(c.w[h], snapshot=snaps[h]["snapshot"], limit="3")
+                if r_.status == 404:
+                    print("       KNOWN GAP (S4-045): stage-3 snapshot token of %s unknown after the import (stage-3 exports carry no snapshots)" % h)
+                    continue
+                eq(pages_all(c.w[h], snaps[h]["snapshot"]), frozen[h], "%s: saved statement tokens of %s page the same entries" % (label, h))
             op = c.w["op"]
             mem = c.st["payments"]
             E = inst(c.st["committed_at"]) - timedelta(minutes=30)
@@ -213,6 +220,8 @@ def test_exports_of_stages_1_to_3_are_accepted():
             rf = expect(cy.post("/payments/p_002/refunds", {"amount": 50}, key=fresh_key()), 201, msg="%s: refund of an imported seeded payment" % label).json
             eq(rf["refund_of"], "p_002", "refund_of")
             for h in snaps:
+                if stmt_raw(c.w[h], snapshot=snaps[h]["snapshot"], limit="3").status == 404:
+                    continue                                   # known gap, see above
                 eq(pages_all(c.w[h], snaps[h]["snapshot"]), frozen[h], "%s: old snapshots still frozen after batches and refunds" % label)
         ran += 1
     if not ran:

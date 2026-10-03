@@ -129,7 +129,7 @@
 ~ Batch vs batch (overlapping sets), batch vs single correction, identical-key retries; disjoint batches may all succeed; refund vs correction and refund vs refund on one payment cannot jointly exceed the cap.
 == S4-045 | batches | data-migration | ★
 > A stage-4 service must accept exports produced by the same team's stages 1–3, retaining settlement membership, corrections and snapshots.
-~ Needs running old services (PROBE_STAGE1/2/3_BASE_URL; run_docker.sh --stage1-ref/--stage2-ref/--stage3-ref builds them); SKIP otherwise. Imported settlements: membership kept (a batch must include every member; a partial batch is incomplete_settlement). Stage-3 exports: correction histories kept, snapshot tokens still page their frozen entries.
+~ Needs running old services (PROBE_STAGE1/2/3_BASE_URL; run_docker.sh --stage1-ref/--stage2-ref/--stage3-ref builds them); SKIP otherwise. Imported settlements: membership kept (a batch must include every member; a partial batch is incomplete_settlement). Stage-3 exports: correction histories kept. KNOWN GAP (coordinator decision, recorded here and in the implementer's report): a stage-3 export never contained snapshot tokens, so tokens issued by the old stage-3 service cannot be reconstructed; the probe reports them as a known gap when unknown (404) and only requires the frozen entries when they do page. Snapshot retention is required and probed for a stage-4 export (S4-049).
 
 == S4-046 | carried | idempotency | ★
 > Key reused after the original request failed with 4xx | Treated as a first use
