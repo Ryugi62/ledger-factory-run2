@@ -1,6 +1,7 @@
 'use strict';
-// Pocketful stage 2: wallet, payments, requests, splits, settlements, payment
-// authorizations (holds and captures) over HTTP, plus the browser UI.
+// Pocketful stage 3: wallet, payments, requests, splits, settlements, payment
+// authorizations, bitemporal statements and payment corrections over HTTP, plus
+// the browser UI.
 // All state lives in memory. Every state-changing step runs synchronously on the
 // event loop, so each operation is atomic with respect to every other request.
 
@@ -19,6 +20,8 @@ const AUTH_STATUSES = ['open', 'captured', 'voided', 'expired'];
 const DEFAULT_TTL = 600;
 const SERVICE_STAGE1 = 'pocketful-stage-1';
 const SERVICE_STAGE2 = 'pocketful-stage-2';
+const SERVICE_STAGE3 = 'pocketful-stage-3';
+const CLOCK_SKEW_US = 2e6;
 
 // ---------------------------------------------------------------- errors
 
@@ -37,24 +40,60 @@ const forbidden = (m) => new ApiError(403, 'forbidden', m || 'forbidden');
 
 // ---------------------------------------------------------------- helpers
 
-// RFC 3339 with an explicit numeric offset; milliseconds only when nonzero.
-function stampOf(ms) {
+// Instants are integer microseconds since the epoch.
+const nowUs = () => Date.now() * 1000;
+
+// The event clock gives every recorded event a distinct, strictly increasing
+// instant, so events never tie and the revisions of a payment are recorded in
+// strictly increasing order even within one millisecond.
+let lastUs = 0;
+function tick() {
+  lastUs = Math.max(nowUs(), lastUs + 1);
+  return lastUs;
+}
+
+function observeUs(us) {
+  if (us > lastUs && us <= nowUs() + 1e6) lastUs = us;
+}
+
+// RFC 3339 with a numeric offset; the fraction is only as long as needed.
+function stampOf(us) {
+  const ms = Math.floor(us / 1000);
+  const micro = us - ms * 1000;
   const iso = new Date(ms).toISOString();
-  const frac = iso.slice(19, 23);
-  return iso.slice(0, 19) + (frac === '.000' ? '' : frac) + '+00:00';
+  const msPart = iso.slice(20, 23);
+  let frac = '';
+  if (micro) frac = '.' + msPart + String(micro).padStart(3, '0');
+  else if (msPart !== '000') frac = '.' + msPart;
+  return iso.slice(0, 19) + frac + '+00:00';
 }
 
-function nowStamp() {
-  // Second precision, so created_at + ttl is exact.
-  return stampOf(Math.floor(Date.now() / 1000) * 1000);
+const RFC3339_RE = /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?(?:([Zz])|([+-])(\d{2}):(\d{2}))$/;
+
+function daysIn(year, month) {
+  if (month === 2) return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0 ? 29 : 28;
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
 }
 
-const RFC3339_RE = /^\d{4}-\d\d-\d\d[Tt ]\d\d:\d\d:\d\d(\.\d+)?([Zz]|[+-]\d\d:\d\d)$/;
-
-function parseStamp(v) {
-  if (typeof v !== 'string' || !RFC3339_RE.test(v)) return null;
-  const ms = Date.parse(v.replace(' ', 'T'));
-  return Number.isFinite(ms) ? ms : null;
+// Strict RFC 3339 instant with an offset -> microseconds, or null.
+function parseInstant(v) {
+  if (typeof v !== 'string') return null;
+  const m = RFC3339_RE.exec(v);
+  if (!m) return null;
+  const [Y, Mo, D, h, mi, s] = m.slice(1, 7).map(Number);
+  if (Mo < 1 || Mo > 12 || D < 1 || D > daysIn(Y, Mo) || h > 23 || mi > 59 || s > 59) return null;
+  let offsetMin = 0;
+  if (!m[8]) {
+    const oh = Number(m[10]);
+    const om = Number(m[11]);
+    if (oh > 23 || om > 59) return null;
+    offsetMin = (m[9] === '-' ? -1 : 1) * (oh * 60 + om);
+  }
+  const d = new Date(0);
+  d.setUTCFullYear(Y, Mo - 1, D);
+  d.setUTCHours(h, mi, s, 0);
+  const micro = m[7] ? Number(m[7].slice(1, 7).padEnd(6, '0')) : 0;
+  return d.getTime() * 1000 + micro - offsetMin * 60 * 1e6;
 }
 
 function codePoints(s) {
@@ -183,23 +222,26 @@ function emptyState() {
   return {
     currency: 'EUR',
     minor_units: 2,
-    users: new Map(),      // id -> user
-    byEmail: new Map(),    // lowercased email -> id
-    byHandle: new Map(),   // handle -> id
-    tokens: new Map(),     // token -> user id
-    payments: [],          // creation order
+    users: new Map(),        // id -> user
+    byEmail: new Map(),      // lowercased email -> id
+    byHandle: new Map(),     // handle -> id
+    tokens: new Map(),       // token -> user id
+    payments: [],            // ordered by created_at, oldest first
     paymentsById: new Map(),
-    requests: [],          // creation order
+    userPayments: new Map(), // user id -> payments the user sent or received
+    requests: [],            // creation order
     requestsById: new Map(),
     splits: [],
     splitIds: new Set(),
     settlements: [],
     settlementIds: new Set(),
-    auths: [],             // creation order
+    auths: [],               // creation order
     authsById: new Map(),
-    openAuths: new Map(),  // payer id -> Set of open authorizations
+    openAuths: new Map(),    // payer id -> Set of open authorizations
+    userAuths: new Map(),    // payer id -> authorizations
     ttl: DEFAULT_TTL,
-    idem: new Map(),       // user \n path \n key -> { hash, status, body }
+    idem: new Map(),         // user \n path \n key -> { hash, status, body }
+    snapshots: new Map(),    // statement token -> { user, result }
     seq: 0,
   };
 }
@@ -210,14 +252,26 @@ function nextId(prefix, taken) {
   let id;
   do {
     state.seq += 1;
-    id = prefix + state.seq;
+    id = prefix + String(state.seq).padStart(6, '0');
   } while (taken(id));
   return id;
+}
+
+function indexUnder(map, key, value) {
+  if (!map.has(key)) map.set(key, []);
+  map.get(key).push(value);
+}
+
+// A payment's history: revision 1 is the payment as made; corrections append.
+function revision(n, amount, effUs, recUs, reason) {
+  return { revision: n, amount, effUs, effective_at: stampOf(effUs), recUs, recorded_at: stampOf(recUs), reason };
 }
 
 function addPayment(st, p) {
   st.payments.push(p);
   st.paymentsById.set(p.id, p);
+  indexUnder(st.userPayments, p.from, p);
+  indexUnder(st.userPayments, p.to, p);
 }
 
 function addRequest(st, r) {
@@ -228,22 +282,25 @@ function addRequest(st, r) {
 function addAuth(st, a) {
   st.auths.push(a);
   st.authsById.set(a.id, a);
+  indexUnder(st.userAuths, a.from, a);
   if (a.status === 'open') {
     if (!st.openAuths.has(a.from)) st.openAuths.set(a.from, new Set());
     st.openAuths.get(a.from).add(a);
   }
 }
 
-function closeAuth(a, status) {
+function closeAuth(a, status, us) {
   a.status = status;
+  a.closedUs = us;
+  a.closeKind = status;
   const set = state.openAuths.get(a.from);
   if (set) set.delete(a);
 }
 
 // An open authorization whose deadline has passed is expired, whether or not
-// any request happened at the deadline.
-function refreshAuth(a, now = Date.now()) {
-  if (a.status === 'open' && now >= a.expiresMs) closeAuth(a, 'expired');
+// any request happened at the deadline. It closed at its deadline.
+function refreshAuth(a, now = nowUs()) {
+  if (a.status === 'open' && now >= a.expiresUs) closeAuth(a, 'expired', a.expiresUs);
   return a;
 }
 
@@ -254,7 +311,7 @@ function remainingOf(a) {
 function heldOf(user) {
   const set = state.openAuths.get(user.id);
   if (!set) return 0;
-  const now = Date.now();
+  const now = nowUs();
   let held = 0;
   for (const a of [...set]) {
     refreshAuth(a, now);
@@ -285,13 +342,14 @@ function authView(a) {
     visibility: a.visibility,
     status: a.status,
     expires_at: a.expires_at,
+    closed_at: a.status === 'open' ? null : a.status === 'expired' ? a.expires_at : stampOf(a.closedUs),
     payment_id: a.payment_ids.length ? a.payment_ids[a.payment_ids.length - 1] : null,
     payment_ids: a.payment_ids.slice(),
     created_at: a.created_at,
   };
 }
 
-function paymentView(p) {
+function paymentView(p, amount = p.amount) {
   const from = state.users.get(p.from);
   const to = state.users.get(p.to);
   return {
@@ -300,7 +358,7 @@ function paymentView(p) {
     from_handle: from.handle,
     to_user_id: p.to,
     to_handle: to.handle,
-    amount: p.amount,
+    amount,
     currency: state.currency,
     note: p.note,
     visibility: p.visibility,
@@ -329,10 +387,129 @@ function requestView(r) {
   };
 }
 
+function revisionView(p, r) {
+  return {
+    payment_id: p.id,
+    revision: r.revision,
+    amount: r.amount,
+    effective_at: r.effective_at,
+    recorded_at: r.recorded_at,
+    reason: r.reason,
+  };
+}
+
 function issueToken(userId, st = state) {
   const token = crypto.randomBytes(24).toString('base64url');
   st.tokens.set(token, userId);
   return token;
+}
+
+// ---------------------------------------------------------------- history
+
+// The latest revision recorded at or before knownUs (null: everything known).
+function selectedRev(p, knownUs) {
+  if (knownUs === null) return p.revs[p.revs.length - 1];
+  for (let i = p.revs.length - 1; i >= 0; i--) {
+    if (p.revs[i].recUs <= knownUs) return p.revs[i];
+  }
+  return null;
+}
+
+const signedFor = (p, uid, amount) => (p.from === uid ? -amount : amount);
+
+// Balance after every selected movement effective at or before asUs.
+function balanceAt(user, asUs, knownUs) {
+  let b = user.opening || 0;
+  for (const p of state.userPayments.get(user.id) || []) {
+    const r = selectedRev(p, knownUs);
+    if (r && r.effUs <= asUs) b += signedFor(p, user.id, r.amount);
+  }
+  return b;
+}
+
+// Money held at asUs as far as known at knownUs. Creation, captures, voids and
+// final captures are known at their own instants; the deadline is known with
+// the creation.
+function heldAt(user, asUs, knownUs) {
+  const horizon = knownUs === null ? asUs : Math.min(asUs, knownUs);
+  let held = 0;
+  for (const a of state.userAuths.get(user.id) || []) {
+    if (a.createdUs > horizon) continue;
+    if (asUs >= a.expiresUs) continue;
+    if (a.closeKind !== null && a.closeKind !== 'expired' && a.closedUs <= horizon) continue;
+    let captured = a.seedCaptured;
+    for (const c of a.captures) if (c.us <= horizon) captured += c.amount;
+    held += Math.max(0, a.amount - captured);
+  }
+  return held;
+}
+
+// Under the latest revisions, total and available must be nonnegative after
+// the combined effect of every instant at which something happened.
+function historyIsSound(user) {
+  const events = [];
+  for (const p of state.userPayments.get(user.id) || []) {
+    const r = p.revs[p.revs.length - 1];
+    events.push([r.effUs, signedFor(p, user.id, r.amount), 0]);
+  }
+  for (const a of state.userAuths.get(user.id) || []) {
+    if (a.closeKind === 'seeded') continue;
+    let end = a.expiresUs;
+    if (a.closeKind !== null && a.closeKind !== 'expired') end = Math.min(end, a.closedUs);
+    if (a.createdUs >= end) continue;
+    let remaining = a.amount - a.seedCaptured;
+    events.push([a.createdUs, 0, remaining]);
+    for (const c of a.captures) {
+      if (c.us > end) continue;
+      events.push([c.us, 0, -c.amount]);
+      remaining -= c.amount;
+    }
+    if (remaining > 0) events.push([end, 0, -remaining]);
+  }
+  events.sort((x, y) => x[0] - y[0]);
+  let total = user.opening || 0;
+  let held = 0;
+  if (total < 0) return false;
+  for (let i = 0; i < events.length;) {
+    const t = events[i][0];
+    while (i < events.length && events[i][0] === t) {
+      total += events[i][1];
+      held += events[i][2];
+      i++;
+    }
+    if (total < 0 || total - held < 0) return false;
+  }
+  return true;
+}
+
+// The caller's movements in [fromUs, toUs) under the revisions known at knownUs,
+// ordered by effective time and then payment id, with running balances.
+function buildStatement(user, fromUs, toUs, knownUs) {
+  let opening = user.opening || 0;
+  let closing = opening;
+  const rows = [];
+  for (const p of state.userPayments.get(user.id) || []) {
+    const r = selectedRev(p, knownUs);
+    if (!r) continue;
+    const delta = signedFor(p, user.id, r.amount);
+    if (r.effUs < fromUs) opening += delta;
+    if (r.effUs < toUs) closing += delta;
+    if (r.effUs >= fromUs && r.effUs < toUs) rows.push({ p, r, delta });
+  }
+  rows.sort((x, y) => (x.r.effUs - y.r.effUs) || (x.p.id < y.p.id ? -1 : x.p.id > y.p.id ? 1 : 0));
+  let running = opening;
+  const entries = rows.map(({ p, r, delta }) => {
+    running += delta;
+    return {
+      payment: paymentView(p, r.amount),
+      delta,
+      balance_after: running,
+      revision: r.revision,
+      effective_at: r.effective_at,
+      recorded_at: r.recorded_at,
+    };
+  });
+  return { opening_balance: opening, closing_balance: closing, entries };
 }
 
 // ---------------------------------------------------------------- reset fixture
@@ -360,27 +537,45 @@ async function buildFromFixture(fx) {
     if (st.byEmail.has(emailKey(u.email))) throw invalid('duplicate email');
     const user = {
       id: u.id, email: u.email, hash: null, display_name: u.display_name,
-      handle: u.handle, balance: u.balance, operator: false,
+      handle: u.handle, balance: u.balance, opening: u.balance, operator: false,
     };
     st.users.set(user.id, user);
     st.byEmail.set(emailKey(user.email), user.id);
     st.byHandle.set(user.handle, user.id);
     pending.push([user, u.password]);
   }
-  const stamp = nowStamp();
+  const resetUs = tick();
+  const now = nowUs();
+  const stamp = stampOf(resetUs);
   const payments = has(fx, 'payments') && fx.payments !== null ? fx.payments : [];
   if (!Array.isArray(payments)) throw invalid('payments must be an array');
+  const seeded = [];
   for (const p of payments) {
     if (!isObject(p)) throw invalid('payment must be an object');
     if (typeof p.id !== 'string' || !p.id || p.id.length > 64) throw invalid('payment.id is invalid');
-    if (st.paymentsById.has(p.id)) throw invalid('duplicate payment id');
+    if (st.paymentsById.has(p.id) || seeded.some((x) => x.id === p.id)) throw invalid('duplicate payment id');
     if (!st.users.has(p.from_user_id) || !st.users.has(p.to_user_id)) throw invalid('payment user unknown');
     if (!isExactInt(p.amount) || p.amount < 1) throw invalid('payment.amount is invalid');
-    addPayment(st, {
+    let createdUs = resetUs;
+    if (has(p, 'created_at') && p.created_at !== null) {
+      createdUs = parseInstant(p.created_at);
+      if (createdUs === null) throw invalid('payment.created_at must be an RFC 3339 instant');
+      if (createdUs > now) throw invalid('payment.created_at must not be in the future');
+    }
+    seeded.push({
       id: p.id, from: p.from_user_id, to: p.to_user_id, amount: p.amount,
       note: checkNote(p), visibility: checkVisibility(p),
-      request_id: null, settlement_id: null, created_at: stamp,
+      request_id: null, authorization_id: null, settlement_id: null,
+      createdUs, created_at: createdUs === resetUs ? stamp : stampOf(createdUs),
+      revs: [revision(1, p.amount, createdUs, createdUs, '')],
     });
+  }
+  // Fixture balances are ending balances; each wallet opened before its seeded payments.
+  seeded.sort((a, b) => a.createdUs - b.createdUs);
+  for (const p of seeded) {
+    st.users.get(p.from).opening += p.amount;
+    st.users.get(p.to).opening -= p.amount;
+    addPayment(st, p);
   }
   const requests = has(fx, 'requests') && fx.requests !== null ? fx.requests : [];
   if (!Array.isArray(requests)) throw invalid('requests must be an array');
@@ -419,7 +614,6 @@ async function buildFromFixture(fx) {
   }
   const auths = has(fx, 'authorizations') && fx.authorizations !== null ? fx.authorizations : [];
   if (!Array.isArray(auths)) throw invalid('authorizations must be an array');
-  const now = Date.now();
   const holds = new Map();
   for (const a of auths) {
     if (!isObject(a)) throw invalid('authorization must be an object');
@@ -430,10 +624,16 @@ async function buildFromFixture(fx) {
     if (!isExactInt(a.amount) || a.amount < 1) throw invalid('authorization.amount is invalid');
     const status = has(a, 'status') ? a.status : 'open';
     if (!AUTH_STATUSES.includes(status)) throw invalid('authorization.status is invalid');
-    let expiresMs = now + st.ttl * 1000;
+    let createdUs = resetUs;
+    if (has(a, 'created_at') && a.created_at !== null) {
+      createdUs = parseInstant(a.created_at);
+      if (createdUs === null) throw invalid('authorization.created_at must be an RFC 3339 instant');
+      if (createdUs > now) throw invalid('authorization.created_at must not be in the future');
+    }
+    let expiresUs = createdUs + st.ttl * 1e6;
     if (has(a, 'expires_at')) {
-      expiresMs = parseStamp(a.expires_at);
-      if (expiresMs === null) throw invalid('authorization.expires_at must be an RFC 3339 timestamp');
+      expiresUs = parseInstant(a.expires_at);
+      if (expiresUs === null) throw invalid('authorization.expires_at must be an RFC 3339 timestamp');
     } else if (status === 'open') {
       throw invalid('an open authorization needs expires_at');
     }
@@ -448,11 +648,21 @@ async function buildFromFixture(fx) {
     if (Array.isArray(a.payment_ids) && a.payment_ids.every((x) => typeof x === 'string')) paymentIds.push(...a.payment_ids);
     else if (typeof a.payment_id === 'string') paymentIds.push(a.payment_id);
     const auth = {
-      id: a.id, from: a.from_user_id, to: a.to_user_id, amount: a.amount, captured,
+      id: a.id, from: a.from_user_id, to: a.to_user_id, amount: a.amount, captured, seedCaptured: captured,
       note: checkNote(a), visibility: checkVisibility(a), status,
-      expiresMs, expires_at: stampOf(expiresMs), created_at: stamp, payment_ids: paymentIds,
+      createdUs, created_at: createdUs === resetUs ? stamp : stampOf(createdUs),
+      expiresUs, expires_at: stampOf(expiresUs), payment_ids: paymentIds, captures: [],
+      closedUs: null, closeKind: null,
     };
-    if (auth.status === 'open' && now >= expiresMs) auth.status = 'expired';
+    if (auth.status === 'open' && now >= expiresUs) auth.status = 'expired';
+    // Seeded closed holds have no reconstructed lifecycle: they closed when they appeared.
+    if (auth.status === 'expired') {
+      auth.closedUs = expiresUs;
+      auth.closeKind = 'expired';
+    } else if (auth.status !== 'open') {
+      auth.closedUs = createdUs;
+      auth.closeKind = 'seeded';
+    }
     if (auth.status === 'open') holds.set(auth.from, (holds.get(auth.from) || 0) + auth.amount - auth.captured);
     addAuth(st, auth);
   }
@@ -470,7 +680,7 @@ function exportState() {
   const users = [];
   for (const u of state.users.values()) {
     users.push({ id: u.id, email: u.email, hash: u.hash, display_name: u.display_name,
-      handle: u.handle, balance: u.balance, operator: u.operator });
+      handle: u.handle, balance: u.balance, opening: u.opening || 0, operator: u.operator });
   }
   const tokens = [];
   for (const [t, uid] of state.tokens) tokens.push([t, uid]);
@@ -480,7 +690,7 @@ function exportState() {
     track: 'pocketful',
     format_version: 1,
     state: {
-      service: SERVICE_STAGE2,
+      service: SERVICE_STAGE3,
       currency: state.currency,
       minor_units: state.minor_units,
       authorization_ttl_seconds: state.ttl,
@@ -488,11 +698,19 @@ function exportState() {
         refreshAuth(a);
         return { id: a.id, from: a.from, to: a.to, amount: a.amount, captured: a.captured, note: a.note,
           visibility: a.visibility, status: a.status, expires_at: a.expires_at, created_at: a.created_at,
-          payment_ids: a.payment_ids.slice() };
+          payment_ids: a.payment_ids.slice(), seed_captured: a.seedCaptured,
+          captures: a.captures.map((c) => ({ payment_id: c.payment_id, amount: c.amount, at: stampOf(c.us) })),
+          closed_at: a.closeKind === null ? null : stampOf(a.closedUs), close_kind: a.closeKind };
       }),
       users,
       tokens,
-      payments: state.payments.map((p) => ({ ...p, authorization_id: p.authorization_id || null })),
+      payments: state.payments.map((p) => ({
+        id: p.id, from: p.from, to: p.to, amount: p.amount, note: p.note, visibility: p.visibility,
+        request_id: p.request_id, authorization_id: p.authorization_id || null, settlement_id: p.settlement_id,
+        created_at: p.created_at,
+        revisions: p.revs.map((r) => ({ revision: r.revision, amount: r.amount, effective_at: r.effective_at,
+          recorded_at: r.recorded_at, reason: r.reason })),
+      })),
       requests: state.requests.map((r) => ({ ...r })),
       splits: deepCopy(state.splits),
       settlements: deepCopy(state.settlements),
@@ -502,15 +720,21 @@ function exportState() {
   };
 }
 
+// Accepts exports of this service and of the same team's stage-1 and stage-2
+// services. Older states lack revision histories, opening balances and hold
+// lifecycles; those are derived from what the older state recorded.
 function importState(doc) {
   if (!isObject(doc)) throw invalid('import body must be an export object');
   if (doc.track !== 'pocketful') throw invalid('track must be pocketful');
   if (doc.format_version !== 1) throw invalid('format_version must be 1');
   const s = doc.state;
   const bad = (m) => invalid('invalid state: ' + m);
-  if (!isObject(s) || (s.service !== SERVICE_STAGE1 && s.service !== SERVICE_STAGE2)) throw bad('not a state of this service');
-  const v2 = s.service === SERVICE_STAGE2;
-  if (v2 && (!Array.isArray(s.authorizations) || !Number.isSafeInteger(s.authorization_ttl_seconds)
+  if (!isObject(s) || ![SERVICE_STAGE1, SERVICE_STAGE2, SERVICE_STAGE3].includes(s.service)) {
+    throw bad('not a state of this service');
+  }
+  const v1 = s.service === SERVICE_STAGE1;
+  const v3 = s.service === SERVICE_STAGE3;
+  if (!v1 && (!Array.isArray(s.authorizations) || !Number.isSafeInteger(s.authorization_ttl_seconds)
     || s.authorization_ttl_seconds < 1)) throw bad('authorizations');
   if (typeof s.currency !== 'string' || ![0, 2, 3].includes(s.minor_units)) throw bad('currency');
   for (const f of ['users', 'tokens', 'payments', 'requests', 'splits', 'settlements', 'idempotency']) {
@@ -521,16 +745,17 @@ function importState(doc) {
   st.currency = s.currency;
   st.minor_units = s.minor_units;
   st.seq = s.seq;
-  if (v2) st.ttl = s.authorization_ttl_seconds;
+  if (!v1) st.ttl = s.authorization_ttl_seconds;
   const str = (v) => typeof v === 'string';
   const optStr = (v) => v === null || typeof v === 'string';
   for (const u of s.users) {
     if (!isObject(u) || !str(u.id) || !str(u.email) || !str(u.display_name) || !str(u.handle)
       || !HANDLE_RE.test(u.handle) || !isExactInt(u.balance) || u.balance < 0
-      || typeof u.operator !== 'boolean' || !parseHash(u.hash)) throw bad('user');
+      || typeof u.operator !== 'boolean' || !parseHash(u.hash)
+      || (v3 && !isExactInt(u.opening))) throw bad('user');
     if (st.users.has(u.id) || st.byHandle.has(u.handle) || st.byEmail.has(emailKey(u.email))) throw bad('duplicate user');
     st.users.set(u.id, { id: u.id, email: u.email, hash: u.hash, display_name: u.display_name,
-      handle: u.handle, balance: u.balance, operator: u.operator });
+      handle: u.handle, balance: u.balance, opening: v3 ? u.opening : u.balance, operator: u.operator });
     st.byEmail.set(emailKey(u.email), u.id);
     st.byHandle.set(u.handle, u.id);
   }
@@ -538,14 +763,44 @@ function importState(doc) {
     if (!Array.isArray(t) || t.length !== 2 || !str(t[0]) || !st.users.has(t[1])) throw bad('token');
     st.tokens.set(t[0], t[1]);
   }
+  const payments = [];
+  const seen = new Set();
+  let latest = 0;
   for (const p of s.payments) {
-    if (!isObject(p) || !str(p.id) || st.paymentsById.has(p.id) || !st.users.has(p.from) || !st.users.has(p.to)
+    const createdUs = isObject(p) ? parseInstant(p.created_at) : null;
+    if (!isObject(p) || !str(p.id) || seen.has(p.id) || !st.users.has(p.from) || !st.users.has(p.to)
       || !isExactInt(p.amount) || !str(p.note) || !['public', 'private'].includes(p.visibility)
-      || !optStr(p.request_id) || !optStr(p.settlement_id) || !str(p.created_at)
+      || !optStr(p.request_id) || !optStr(p.settlement_id) || createdUs === null
       || (has(p, 'authorization_id') && !optStr(p.authorization_id))) throw bad('payment');
-    addPayment(st, { id: p.id, from: p.from, to: p.to, amount: p.amount, note: p.note,
+    seen.add(p.id);
+    let revs;
+    if (v3) {
+      if (!Array.isArray(p.revisions) || !p.revisions.length) throw bad('payment revisions');
+      revs = p.revisions.map((r, i) => {
+        const effUs = isObject(r) ? parseInstant(r.effective_at) : null;
+        const recUs = isObject(r) ? parseInstant(r.recorded_at) : null;
+        if (effUs === null || recUs === null || r.revision !== i + 1 || !isExactInt(r.amount) || r.amount < 0
+          || !str(r.reason)) throw bad('revision');
+        return { revision: r.revision, amount: r.amount, effUs, effective_at: r.effective_at, recUs,
+          recorded_at: r.recorded_at, reason: r.reason };
+      });
+    } else {
+      revs = [revision(1, p.amount, createdUs, createdUs, '')];
+      revs[0].effective_at = p.created_at;
+      revs[0].recorded_at = p.created_at;
+    }
+    for (const r of revs) latest = Math.max(latest, r.recUs);
+    payments.push({ id: p.id, from: p.from, to: p.to, amount: p.amount, note: p.note,
       visibility: p.visibility, request_id: p.request_id, authorization_id: p.authorization_id || null,
-      settlement_id: p.settlement_id, created_at: p.created_at });
+      settlement_id: p.settlement_id, createdUs, created_at: p.created_at, revs });
+  }
+  payments.sort((a, b) => a.createdUs - b.createdUs);
+  for (const p of payments) {
+    addPayment(st, p);
+    if (!v3) {
+      st.users.get(p.from).opening += p.amount;
+      st.users.get(p.to).opening -= p.amount;
+    }
   }
   for (const r of s.requests) {
     if (!isObject(r) || !str(r.id) || st.requestsById.has(r.id) || !st.users.has(r.requester) || !st.users.has(r.payer)
@@ -565,18 +820,54 @@ function importState(doc) {
     st.settlementIds.add(se.id);
   }
   const held = new Map();
-  for (const a of v2 ? s.authorizations : []) {
-    const expiresMs = isObject(a) ? parseStamp(a.expires_at) : null;
+  for (const a of v1 ? [] : s.authorizations) {
+    const expiresUs = isObject(a) ? parseInstant(a.expires_at) : null;
+    const createdUs = isObject(a) ? parseInstant(a.created_at) : null;
     if (!isObject(a) || !str(a.id) || st.authsById.has(a.id) || !st.users.has(a.from) || !st.users.has(a.to)
       || !isExactInt(a.amount) || a.amount < 1 || !isExactInt(a.captured) || a.captured < 0 || a.captured > a.amount
       || !str(a.note) || !['public', 'private'].includes(a.visibility) || !AUTH_STATUSES.includes(a.status)
-      || expiresMs === null || !str(a.created_at) || !Array.isArray(a.payment_ids) || !a.payment_ids.every(str)) {
+      || expiresUs === null || createdUs === null || !Array.isArray(a.payment_ids) || !a.payment_ids.every(str)) {
       throw bad('authorization');
     }
+    const auth = { id: a.id, from: a.from, to: a.to, amount: a.amount, captured: a.captured, seedCaptured: 0,
+      note: a.note, visibility: a.visibility, status: a.status, createdUs, created_at: a.created_at,
+      expiresUs, expires_at: a.expires_at, payment_ids: a.payment_ids.slice(), captures: [],
+      closedUs: null, closeKind: null };
+    if (v3) {
+      if (!isExactInt(a.seed_captured) || !Array.isArray(a.captures) || !optStr(a.closed_at)
+        || ![null, 'captured', 'voided', 'expired', 'seeded'].includes(a.close_kind)) throw bad('authorization lifecycle');
+      auth.seedCaptured = a.seed_captured;
+      for (const c of a.captures) {
+        const us = isObject(c) ? parseInstant(c.at) : null;
+        if (us === null || !str(c.payment_id) || !isExactInt(c.amount)) throw bad('capture');
+        auth.captures.push({ us, amount: c.amount, payment_id: c.payment_id });
+      }
+      auth.closeKind = a.close_kind;
+      auth.closedUs = a.closed_at === null ? null : parseInstant(a.closed_at);
+      if ((auth.closeKind === null) !== (auth.closedUs === null)) throw bad('authorization closing');
+    } else {
+      // Captures are the linked payments; the remainder of the captured amount predates them.
+      let found = 0;
+      for (const pid of a.payment_ids) {
+        const p = st.paymentsById.get(pid);
+        if (p && p.authorization_id === a.id) {
+          auth.captures.push({ us: p.createdUs, amount: p.amount, payment_id: p.id });
+          found += p.amount;
+        }
+      }
+      auth.seedCaptured = Math.max(0, a.captured - found);
+      const lastEvent = auth.captures.length ? auth.captures[auth.captures.length - 1].us : createdUs;
+      if (a.status === 'expired') {
+        auth.closedUs = expiresUs;
+        auth.closeKind = 'expired';
+      } else if (a.status !== 'open') {
+        auth.closedUs = lastEvent;
+        auth.closeKind = a.status;
+      }
+    }
+    latest = Math.max(latest, createdUs, auth.closedUs || 0);
     if (a.status === 'open') held.set(a.from, (held.get(a.from) || 0) + a.amount - a.captured);
-    addAuth(st, { id: a.id, from: a.from, to: a.to, amount: a.amount, captured: a.captured, note: a.note,
-      visibility: a.visibility, status: a.status, expiresMs, expires_at: a.expires_at, created_at: a.created_at,
-      payment_ids: a.payment_ids.slice() });
+    addAuth(st, auth);
   }
   for (const [uid, h] of held) {
     if (h > st.users.get(uid).balance) throw bad('holds exceed a balance');
@@ -585,6 +876,7 @@ function importState(doc) {
     if (!isObject(e) || !str(e.scope) || !str(e.hash) || ![201].includes(e.status) || !isObject(e.body)) throw bad('idempotency');
     st.idem.set(e.scope, { hash: e.hash, status: e.status, body: e.body });
   }
+  observeUs(latest);
   return st;
 }
 
@@ -724,13 +1016,16 @@ function userByHandle(handle) {
 // ---------------------------------------------------------------- operations
 
 function createPayment(from, to, amount, note, visibility, links = {}) {
+  const createdUs = links.createdUs || tick();
   const p = {
     id: nextId('pay_', (id) => state.paymentsById.has(id)),
     from: from.id, to: to.id, amount, note, visibility,
     request_id: links.request_id || null,
     authorization_id: links.authorization_id || null,
     settlement_id: links.settlement_id || null,
-    created_at: links.created_at || nowStamp(),
+    createdUs,
+    created_at: stampOf(createdUs),
+    revs: [revision(1, amount, createdUs, createdUs, '')],
   };
   from.balance -= amount;
   to.balance += amount;
@@ -760,7 +1055,7 @@ function opRequest(user, body) {
   const r = {
     id: nextId('rq_', (id) => state.requestsById.has(id)),
     requester: user.id, payer: payer.id, amount, note,
-    status: 'pending', payment_id: null, created_at: nowStamp(),
+    status: 'pending', payment_id: null, created_at: stampOf(tick()),
   };
   addRequest(state, r);
   return requestView(r);
@@ -798,7 +1093,7 @@ function opSplit(user, body) {
   const n = people.length;
   const base = Math.floor(amount / n);
   const extra = amount - base * n;
-  const createdAt = nowStamp();
+  const createdAt = stampOf(tick());
   const shares = [];
   const requests = [];
   people.forEach((u, i) => {
@@ -853,12 +1148,13 @@ function opSettlement(user, body) {
     }
   }
   const id = nextId('st_', (x) => state.settlementIds.has(x));
-  const committedAt = nowStamp();
+  const committedUs = tick();
+  const committedAt = stampOf(committedUs);
   const payments = entries.map((e) => createPayment(e.from, e.to, e.amount, e.note, e.visibility,
-    { settlement_id: id, created_at: committedAt }));
+    { settlement_id: id, createdUs: committedUs }));
   state.settlements.push({ id, operator: user.id, committed_at: committedAt, payment_ids: payments.map((p) => p.id) });
   state.settlementIds.add(id);
-  return { settlement_id: id, committed_at: committedAt, payments: payments.map(paymentView) };
+  return { settlement_id: id, committed_at: committedAt, payments: payments.map((p) => paymentView(p)) };
 }
 
 function opAuthorize(user, body) {
@@ -870,12 +1166,13 @@ function opAuthorize(user, body) {
   if (!to) throw notFound('no user has that handle');
   if (to.id === user.id) throw new ApiError(422, 'self_payment', 'cannot authorize a payment to yourself');
   if (availableOf(user) < amount) throw new ApiError(409, 'insufficient_funds', 'available balance is too low');
-  const createdAt = nowStamp();
-  const expiresMs = Date.parse(createdAt) + state.ttl * 1000;
+  const createdUs = tick();
+  const expiresUs = createdUs + state.ttl * 1e6;
   const a = {
     id: nextId('auth_', (x) => state.authsById.has(x)),
-    from: user.id, to: to.id, amount, captured: 0, note, visibility, status: 'open',
-    expiresMs, expires_at: stampOf(expiresMs), created_at: createdAt, payment_ids: [],
+    from: user.id, to: to.id, amount, captured: 0, seedCaptured: 0, note, visibility, status: 'open',
+    createdUs, created_at: stampOf(createdUs), expiresUs, expires_at: stampOf(expiresUs),
+    payment_ids: [], captures: [], closedUs: null, closeKind: null,
   };
   addAuth(state, a);
   return authView(a);
@@ -908,7 +1205,8 @@ function opCapture(user, authId, body) {
   const p = createPayment(payer, user, amount, a.note, a.visibility, { authorization_id: a.id });
   a.captured += amount;
   a.payment_ids.push(p.id);
-  if (final || a.captured === a.amount) closeAuth(a, 'captured');
+  a.captures.push({ us: p.createdUs, amount, payment_id: p.id });
+  if (final || a.captured === a.amount) closeAuth(a, 'captured', p.createdUs);
   return paymentView(p);
 }
 
@@ -917,7 +1215,7 @@ function opVoid(user, authId) {
   if (!a) throw notFound('no such authorization');
   if (a.from !== user.id) throw forbidden('only the payer may void this authorization');
   refreshAuth(a);
-  if (a.status === 'open') closeAuth(a, 'voided');
+  if (a.status === 'open') closeAuth(a, 'voided', tick());
   else if (a.status !== 'voided') throw new ApiError(409, 'authorization_not_open', 'the authorization is ' + a.status);
   return authView(a);
 }
@@ -935,7 +1233,7 @@ function listAuthorizations(user, url) {
     if (!AUTH_STATUSES.includes(status)) throw invalid('unknown status');
   }
   const { limit, offset } = pageParams(url);
-  const now = Date.now();
+  const now = nowUs();
   const mine = state.auths.filter((a) => {
     if (a.from !== user.id && a.to !== user.id) return false;
     if (direction === 'outgoing' && a.from !== user.id) return false;
@@ -992,7 +1290,145 @@ function listActivity(user, url) {
   const { limit, offset } = pageParams(url);
   const visible = state.payments.filter((p) => p.visibility === 'public' || p.from === user.id || p.to === user.id);
   const { out, hasMore } = pageNewestFirst(visible, limit, offset);
-  return { payments: out.map(paymentView), has_more: hasMore };
+  return { payments: out.map((p) => paymentView(p)), has_more: hasMore };
+}
+
+// ---------------------------------------------------------------- history endpoints
+
+function instantParam(url, name) {
+  const q = url.searchParams;
+  if (!q.has(name)) return null;
+  const v = q.get(name);
+  const us = parseInstant(v);
+  if (us === null) throw invalid(name + ' must be an RFC 3339 instant with an offset');
+  return { text: v, us };
+}
+
+function meView(user, url) {
+  const asOf = instantParam(url, 'as_of');
+  const knownAt = instantParam(url, 'known_at');
+  if (!asOf && !knownAt) {
+    const held = heldOf(user);
+    return {
+      user_id: user.id, display_name: user.display_name, handle: user.handle,
+      balance: user.balance, total: user.balance, available: user.balance - held, held,
+      currency: state.currency, minor_units: state.minor_units,
+    };
+  }
+  const now = nowUs();
+  const asUs = asOf ? asOf.us : now;
+  const knownUs = knownAt ? knownAt.us : null;
+  const total = balanceAt(user, asUs, knownUs);
+  const held = heldAt(user, asUs, knownUs);
+  const view = {
+    user_id: user.id, display_name: user.display_name, handle: user.handle,
+    balance: total, total, available: total - held, held,
+    currency: state.currency, minor_units: state.minor_units,
+  };
+  if (asOf) view.as_of = asOf.text;
+  if (knownAt) view.known_at = knownAt.text;
+  return view;
+}
+
+function statementPage(result, token, limit, offset) {
+  const page = result.entries.slice(offset, offset + limit);
+  const out = {
+    opening_balance: result.opening_balance,
+    entries: page,
+    closing_balance: result.closing_balance,
+    has_more: offset + limit < result.entries.length,
+    snapshot: token,
+  };
+  if (result.known_at !== undefined) out.known_at = result.known_at;
+  return out;
+}
+
+function getStatement(user, url) {
+  const q = url.searchParams;
+  if (q.has('snapshot')) {
+    for (const f of ['from', 'to', 'known_at']) {
+      if (q.has(f)) throw invalid(f + ' cannot be combined with snapshot');
+    }
+    const { limit, offset } = pageParams(url);
+    const token = q.get('snapshot');
+    const snap = state.snapshots.get(token);
+    if (!snap || snap.user !== user.id) throw notFound('no such statement snapshot');
+    return statementPage(snap.result, token, limit, offset);
+  }
+  const from = instantParam(url, 'from');
+  const to = instantParam(url, 'to');
+  const knownAt = instantParam(url, 'known_at');
+  const { limit, offset } = pageParams(url);
+  // The default end is "now": after every movement already recorded.
+  const toUs = to ? to.us : Math.max(nowUs(), lastUs + 1);
+  const fromUs = from ? from.us : -Infinity;
+  const result = buildStatement(user, fromUs, toUs, knownAt ? knownAt.us : null);
+  if (knownAt) result.known_at = knownAt.text;
+  const token = 'st-' + crypto.randomBytes(18).toString('base64url');
+  state.snapshots.set(token, { user: user.id, result });
+  return statementPage(result, token, limit, offset);
+}
+
+function paymentFor(user, paymentId, missingIsHidden) {
+  const p = state.paymentsById.get(paymentId);
+  if (!p) throw notFound('no such payment');
+  if (missingIsHidden && p.from !== user.id && p.to !== user.id) throw notFound('no such payment');
+  return p;
+}
+
+function listRevisions(user, paymentId) {
+  const p = paymentFor(user, paymentId, true);
+  return { revisions: p.revs.map((r) => revisionView(p, r)) };
+}
+
+const CORRECTION_FIELDS = ['expected_revision', 'amount', 'effective_at', 'reason'];
+
+function opCorrect(user, paymentId, body) {
+  const p = paymentFor(user, paymentId, false);
+  if (p.from !== user.id) throw forbidden('only the sender may correct this payment');
+  for (const f of CORRECTION_FIELDS) {
+    if (!has(body, f)) throw invalid(f + ' is required');
+  }
+  const expected = body.expected_revision;
+  if (typeof expected !== 'number' || !Number.isInteger(expected) || expected < 1) {
+    throw invalid('expected_revision must be a positive integer');
+  }
+  const amount = body.amount;
+  if (typeof amount !== 'number' || !Number.isInteger(amount) || amount < 0 || amount > MAX_AMOUNT) {
+    throw invalid('amount must be an integer from 0 to ' + MAX_AMOUNT);
+  }
+  const effUs = parseInstant(body.effective_at);
+  if (effUs === null) throw invalid('effective_at must be an RFC 3339 instant with an offset');
+  if (effUs > nowUs() + CLOCK_SKEW_US) throw invalid('effective_at must not be later than now');
+  const reason = body.reason;
+  if (typeof reason !== 'string' || codePoints(reason) < 1 || codePoints(reason) > MAX_NOTE) {
+    throw invalid('reason must be 1 to ' + MAX_NOTE + ' characters');
+  }
+  if (p.settlement_id || p.authorization_id) {
+    throw new ApiError(422, 'linked_payment_immutable', 'settlement members and captures cannot be corrected');
+  }
+  const current = p.revs[p.revs.length - 1];
+  if (expected !== current.revision) {
+    throw new ApiError(409, 'stale_revision', 'the payment is at revision ' + current.revision);
+  }
+  const sender = state.users.get(p.from);
+  const receiver = state.users.get(p.to);
+  const diff = amount - current.amount;
+  if (diff > 0 && availableOf(sender) < diff) {
+    throw new ApiError(409, 'insufficient_funds', 'the sender cannot fund the increase');
+  }
+  if (diff < 0 && availableOf(receiver) < -diff) {
+    throw new ApiError(409, 'insufficient_funds', 'the receiver cannot fund the decrease');
+  }
+  const next = revision(current.revision + 1, amount, effUs, tick(), reason);
+  p.revs.push(next);
+  if (!historyIsSound(sender) || !historyIsSound(receiver)) {
+    p.revs.pop();
+    throw new ApiError(409, 'historical_overdraft', 'the correction would overdraw a wallet in the past');
+  }
+  sender.balance -= diff;
+  receiver.balance += diff;
+  return revisionView(p, next);
 }
 
 // ---------------------------------------------------------------- auth endpoints
@@ -1031,7 +1467,7 @@ async function signup(raw) {
     target.seq += 1;
     id = 'u_' + target.seq;
   } while (target.users.has(id));
-  const user = { id, email, hash, display_name: displayName, handle, balance: 0, operator: false };
+  const user = { id, email, hash, display_name: displayName, handle, balance: 0, opening: 0, operator: false };
   target.users.set(id, user);
   target.byEmail.set(emailKey(email), id);
   target.byHandle.set(handle, id);
@@ -1087,6 +1523,7 @@ const API_METHODS = {
   '/activity': ['GET'],
   '/settlements': ['POST'],
   '/authorizations': ['GET', 'POST'],
+  '/statement': ['GET'],
 };
 
 async function route(req, res) {
@@ -1128,22 +1565,19 @@ async function route(req, res) {
 
   const isRequestAction = segs.length === 3 && segs[0] === 'requests' && segs[1] !== ''
     && ['pay', 'decline', 'cancel'].includes(segs[2]);
+  const isPaymentAction = segs.length === 3 && segs[0] === 'payments' && segs[1] !== ''
+    && ['corrections', 'revisions'].includes(segs[2]);
   const isAuthAction = segs.length === 3 && segs[0] === 'authorizations' && segs[1] !== ''
     && ['capture', 'void'].includes(segs[2]);
-  if (!API_METHODS[path] && !isRequestAction && !isAuthAction) throw notFound('no such endpoint');
-  const methods = API_METHODS[path] || ['POST'];
+  if (!API_METHODS[path] && !isRequestAction && !isAuthAction && !isPaymentAction) throw notFound('no such endpoint');
+  const methods = API_METHODS[path] || (isPaymentAction && segs[2] === 'revisions' ? ['GET'] : ['POST']);
   if (!methods.includes(method)) throw new ApiError(405, 'method_not_allowed', 'method not allowed');
 
   const user = authenticate(req);
 
-  if (path === '/me') {
-    const held = heldOf(user);
-    return send(res, 200, {
-      user_id: user.id, display_name: user.display_name, handle: user.handle,
-      balance: user.balance, total: user.balance, available: user.balance - held, held,
-      currency: state.currency, minor_units: state.minor_units,
-    });
-  }
+  if (path === '/me') return send(res, 200, meView(user, url));
+  if (path === '/statement') return send(res, 200, getStatement(user, url));
+  if (isPaymentAction && segs[2] === 'revisions') return send(res, 200, listRevisions(user, decode(segs[1])));
   if (path === '/activity') return send(res, 200, listActivity(user, url));
   if (path === '/requests' && method === 'GET') return send(res, 200, listRequests(user, url));
   if (path === '/authorizations' && method === 'GET') return send(res, 200, listAuthorizations(user, url));
@@ -1152,7 +1586,10 @@ async function route(req, res) {
   if (path === '/payments') result = idempotent(req, user, path, raw, (b) => opPayment(user, b));
   else if (path === '/requests') result = idempotent(req, user, path, raw, (b) => opRequest(user, b));
   else if (path === '/splits') result = idempotent(req, user, path, raw, (b) => opSplit(user, b));
-  else if (path === '/authorizations') result = idempotent(req, user, path, raw, (b) => opAuthorize(user, b));
+  else if (isPaymentAction) {
+    const id = decode(segs[1]);
+    result = idempotent(req, user, '/payments/' + id + '/corrections', raw, (b) => opCorrect(user, id, b));
+  } else if (path === '/authorizations') result = idempotent(req, user, path, raw, (b) => opAuthorize(user, b));
   else if (path === '/settlements') {
     if (!user.operator) throw forbidden('settlements require an operator');
     result = idempotent(req, user, path, raw, (b) => opSettlement(user, b));
@@ -1184,5 +1621,5 @@ server.headersTimeout = 20000;
 
 const port = Number(process.env.PORT) || 8080;
 server.listen(port, '0.0.0.0', () => {
-  console.log('pocketful stage 2 listening on 0.0.0.0:' + port);
+  console.log('pocketful stage 3 listening on 0.0.0.0:' + port);
 });
