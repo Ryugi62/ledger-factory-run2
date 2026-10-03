@@ -1,0 +1,354 @@
+# Source of the stage-3 ledger (same format as stages 1-2; see ../stage-1/ledger_rows.txt).
+#   == ID | section | kind | star(★ or -)
+#   > requirement quoted verbatim   ~ reading/note   ! manual reason   @ shell harness / suite
+# `python3 build_ledger.py` renders ../../ledger/stage-3.md and adds the probe column from the probes' @test(...) ids.
+
+== S3-001 | intro | behaviour | ★
+> The requirements from stages 1 and 2 continue to apply, with the additions below.
+~ "Everything earlier still holds": every row of factory/ledger/stage-1.md (S1-001 … S1-208) and stage-2.md (S2-001 … S2-173) keeps applying, except where the "earlier rows changed" table says the text changed. run_all.py executes the stage-1 suite (p_*.py) and the stage-2 suite (q_*.py, and the browser probes u_*.py unless --no-ui) as part of stage 3.
+@ run_all.py (stage-1 suite p_*.py + stage-2 suite q_*.py/u_*.py)
+== S3-002 | intro | behaviour | -
+> Numbered section references such as §5 and §7 refer to `stage-1.md`.
+! informational
+== S3-003 | intro | behaviour | -
+> Users can request historical balances and paginated statements.
+== S3-004 | intro | behaviour | ★
+> Senders can correct eligible payments while preserving the original receipt.
+~ Reading: every payment is eligible except settlement members and captures (S3-095, S3-098). Direct payments, request-paid payments and seeded payments are therefore correctable by their sender; the request stays `paid` with the same payment_id.
+== S3-005 | intro | behaviour | ★
+> Historical queries must support both the effective date of a payment and the information available at a specified time.
+~ Bitemporal: `as_of` selects the effective time axis, `known_at` the recorded time axis. Probed on a grid of (as_of, known_at) pairs against an independent model of the specification.
+
+== S3-006 | timestamps | time | ★
+> Every payment's `created_at` is an RFC 3339 instant with an offset identifying when it moved money.
+~ Seeded payments: the supplied instant (compared as an instant, any offset). API payments: within 5 minutes of the probe host's clock. Numeric ±HH:MM offset in responses (stage-1 reading S1-031).
+== S3-007 | timestamps | behaviour | -
+> Every endpoint returning a payment includes it.
+~ POST /payments, POST /requests/{id}/pay, capture, settlement members, GET /activity and GET /statement entries.
+== S3-008 | timestamps | behaviour | ★
+> `GET /activity` retains its existing ordering by this field.
+~ Newest first by created_at: seeded payments are ordered by their supplied created_at (not fixture order), and a correction that moves effective_at never reorders the feed.
+== S3-009 | timestamps | time | ★
+> Seeded payments may supply `created_at`; omission uses reset time, before subsequent API-created payments.
+~ An omitted created_at is the reset instant (within the clock-skew allowance) and not later than the first API-created payment; it is later than payments seeded with explicit past instants.
+== S3-010 | timestamps | error | ★
+> A seeded `created_at` in the future gives `422 validation_failed` from `POST /_test/reset`, with no state change.
+~ Probed with +1 h, +1 day and a far-future instant written with a non-UTC offset; earlier state (tokens, balances, payments) is intact afterwards; a past instant is accepted.
+== S3-011 | timestamps | behaviour | ★
+> A fixture's `balance` remains the balance after all seeded payments. Loading those payments must not change that balance.
+~ /me balance equals the fixture balance exactly although seeded payments (with created_at) are loaded; a statement's closing_balance agrees.
+
+== S3-012 | me | behaviour | -
+> `as_of` is optional and is an RFC 3339 instant with an offset.
+~ Reading: RFC 3339 grammar includes the `Z` designator, so `…Z` is accepted (own probe, so the reading can be contested in isolation).
+== S3-013 | me | error | -
+> Anything else — a naive local time, a bare date, an empty value — is 422 `validation_failed`.
+~ Also garbage words, epoch digits, month 13, hour 25 (core list) and, in a separate probe, strict RFC 3339 grammar violations (no seconds, `+0000` without colon, Feb 30, offset +25:00).
+== S3-014 | me | behaviour | ★
+> Without temporal query parameters the response retains the existing money fields and reports current corrected values.
+~ After corrections, plain GET /me shows the corrected balance (sender refunded/charged, receiver the mirror image); stage-2 fields balance/total/available/held stay.
+== S3-015 | me | behaviour | ★
+> With it, `balance` is the caller's balance as it stood at that instant: the balance after every payment of theirs with `created_at` at or before `as_of`, and before every payment after it.
+~ With corrections the payment's selected revision decides (S3-071); without corrections effective_at = created_at so this text holds literally.
+== S3-016 | me | time | ★
+> A payment made at exactly `as_of` counts as having happened.
+~ Probed with API payments (as_of = the created_at the service returned counts; one second earlier does not) and with seeded instants.
+== S3-017 | me | behaviour | -
+> An `as_of` at or after the latest payment returns the current balance.
+~ Includes as_of far in the future.
+== S3-018 | me | behaviour | ★
+> An `as_of` before the earliest payment returns the opening balance — what the wallet held before anything moved.
+== S3-019 | me | behaviour | ★
+> The response carries `as_of` back, exactly as given.
+~ Byte-for-byte echo: `+00:00`, `+02:00`, fractional seconds, `Z`.
+
+== S3-020 | statement | behaviour | ★
+> Both `from` and `to` are optional; `from` defaults to the opening of the wallet and `to` to now.
+~ A statement without parameters lists every payment of the caller; closing_balance equals GET /me balance; from/to accept any RFC 3339 offset; invalid/empty from/to are 422 (reading of S1-075 and S3-074).
+== S3-021 | statement | limit | ★
+> `limit` and `offset` behave exactly as in `GET /requests`.
+~ Default 50 / 1..200 / offset >= 0 / plain decimal digits (`1e2`, `+4`, `4.0` are 422) / unknown params ignored / has_more boundaries / offset past the end gives an empty page, has_more false, 200.
+== S3-022 | statement | behaviour | ★
+> Returns the payments the caller sent or received in the half-open window `[from, to)`, **oldest first**, each with the caller's balance immediately after it:
+~ A payment at exactly `from` is inside, at exactly `to` outside; from == to gives an empty window.
+== S3-023 | statement | behaviour | ★
+> 1. Entries are ordered by `created_at` ascending, then payment `id` ascending for ties.
+~ Superseded by S3-076 (effective_at) once corrections exist; identical without corrections. Ties among seeded payments use equal-length ids so string and numeric id order agree.
+== S3-024 | statement | behaviour | ★
+> 2. `opening_balance` is the balance immediately before `from`.
+== S3-025 | statement | behaviour | ★
+> `closing_balance` is the balance immediately before `to`.
+== S3-026 | statement | behaviour | ★
+> 3. `opening_balance` plus all `delta` values in the full window must equal `closing_balance`.
+~ Verified on the whole window reassembled from pages, for every user, after corrections and zero-amount revisions.
+== S3-027 | statement | behaviour | -
+> A sent payment has a negative `delta`; a received payment has a positive `delta`.
+~ delta == -amount for the sender, +amount for the receiver (selected amount); a zero-amount revision has delta 0.
+== S3-028 | statement | behaviour | ★
+> 4. Pagination must not change an entry's `balance_after` or the window's opening and closing balances. These values describe the full window regardless of `limit` and `offset`.
+~ balance_after of an entry is a running sum from the full-window opening_balance, so on page 2 it does not restart from the page's first entry.
+== S3-029 | statement | behaviour | ★
+> Only payments sent or received by the caller appear in their statement, including when other payments are public.
+== S3-030 | statement | behaviour | ★
+> The activity-feed visibility rules do not apply to statements.
+~ The caller's own private payments appear (as sender and as receiver); other people's public payments do not; an operator who is not a party to a settlement member does not see it.
+== S3-031 | statement | behaviour | -
+> { "opening_balance": 10000, "entries": [ { "payment": { "...": "..." }, "delta": -500, "balance_after": 9500 }, { "payment": { "...": "..." }, "delta": 1200, "balance_after": 10700 } ], "closing_balance": 10700, "has_more": false }
+~ Shape: integers for the money fields, `entries` array of {payment, delta, balance_after, + revision fields of S3-077}, boolean has_more, string snapshot (S3-082). 401 without a valid bearer token (S1-070).
+
+== S3-032 | effective | behaviour | -
+> The service must distinguish **when money took effect** from **when it learned that fact**.
+~ Effective time (effective_at, as_of, statement window) versus recorded time (recorded_at, known_at).
+== S3-033 | effective | behaviour | -
+> Every payment has a revision history.
+~ GET /payments/{id}/revisions works for every payment: direct, request-paid, seeded, capture, settlement member.
+== S3-034 | effective | behaviour | ★
+> Revision 1 has `amount` as originally paid and `effective_at = recorded_at = created_at`.
+~ Probed through the revisions endpoint and the statement entry fields, for API payments, seeded payments, settlement members and captures. Instants compared as instants.
+== S3-035 | effective | behaviour | ★
+> A seeded payment's supplied `created_at` is also its original recorded/effective time; omission uses reset time.
+~ known_at earlier than a seeded payment's created_at excludes it; known_at at that instant includes it.
+== S3-036 | effective | behaviour | ★
+> Opening balances equal seeded ending balances minus the net effect of original seeded payments.
+~ opening = fixture balance + sent - received over the seeded payments (original amounts). Hand-computed from fixtures.
+== S3-037 | effective | behaviour | ★
+> Corrections must not change those opening balances.
+~ After corrections of seeded payments, as_of before everything and a statement with `to` before everything still report the same opening balance.
+== S3-038 | effective | behaviour | -
+> New accounts open at zero.
+~ A signed-up user: statement opening_balance 0, as_of at any past instant 0 until the first payment arrives.
+== S3-039 | effective | behaviour | -
+> Seeded history is consistent and nonnegative.
+! assumption about the inputs; the probes only ever seed consistent, nonnegative histories (checked by the fixture helper)
+
+== S3-040 | corrections | idempotency | ★
+> `POST /payments/{payment_id}/corrections` requires an idempotency key and the original sender.
+~ Eighth idempotent write path: missing/empty key 400 missing_idempotency_key; key 1..255 characters (256 is 422); replay semantics of §7 apply (S3-118 … S3-120).
+== S3-041 | corrections | error | ★
+> An authenticated non-sender gets 403 `forbidden`; unknown payment gets 404.
+~ Readings: the receiver gets exactly 403; a third party gets 403 on a public payment and 403 or 404 on a private one (not visible, S1-072); no token is 401 (S1-070).
+== S3-042 | corrections | error | ★
+> All fields are required.
+~ Each of expected_revision, amount, effective_at, reason missing gives 422 validation_failed and changes nothing.
+== S3-043 | corrections | limit | ★
+> Revision is a positive integer;
+~ 0, -1, 1.5 are 422. Wrong JSON types (string, boolean, null) are accepted as 400 or 422 (S1 §5 reserves 400 for wrong types, stage 3 says invalid input is 422).
+== S3-044 | corrections | limit | ★
+> amount is an integer 0..1000000000 (zero reverses the entire payment);
+~ 0 and 1000000000 accepted, -1 and 1000000001 are 422; strings, booleans, null, arrays are 422 (S1-076); 400.0 and 4e2 are valid integral values (S1-036); zero reverses all of the payment.
+== S3-045 | corrections | limit | ★
+> reason is a string of 1..200 characters;
+~ Characters are Unicode code points (S1-114): 200 emoji accepted, 201 rejected, "" rejected.
+== S3-046 | corrections | time | ★
+> effective time is an RFC 3339 instant not later than now.
+~ A future effective_at is 422; an instant earlier than the payment's own created_at is allowed; an instant equal to the payment's created_at is allowed.
+== S3-047 | corrections | error | -
+> Invalid input is 422 `validation_failed`.
+~ Also unparseable effective_at strings (naive, date only, empty). A non-object body and unparseable JSON stay 400 (S1-068).
+== S3-048 | corrections | behaviour | ★
+> Correction changes neither parties nor visibility.
+~ Same from/to/visibility/note in the payment object everywhere; a private payment stays hidden from third parties; a public one stays visible.
+== S3-049 | corrections | behaviour | -
+> It appends an immutable revision, returning 201 with `payment_id`, `revision`, `amount`, `effective_at`, server-assigned `recorded_at`, and `reason`.
+~ revision = previous + 1; recorded_at within the clock-skew allowance of the probe host; earlier revisions are unchanged by later ones.
+== S3-050 | corrections | time | ★
+> Recorded times for one payment strictly increase.
+~ Ten corrections in quick succession (same second) still yield strictly increasing recorded_at, also greater than created_at of revision 1 (catches second-resolution clocks).
+== S3-051 | corrections | error | -
+> A stale expected revision gives 409 `stale_revision`.
+~ Changes nothing and does not claim the idempotency key.
+== S3-052 | corrections | idempotency | ★
+> Successful replay returns that original revision with 200 even after newer revisions.
+~ Replay body identical (as JSON) to the original 201 body; no new revision; no 409 stale_revision on replay.
+== S3-053 | corrections | idempotency | -
+> Different body with the same key is 409 `idempotency_key_reuse`.
+~ Resolved before field validation and current-resource checks (S1-107): an invalid body with a claimed key is still 409 idempotency_key_reuse.
+== S3-054 | corrections | behaviour | ★
+> The difference from the previous amount moves between the **same two wallets** in the same atomic step.
+~ Third parties are untouched; the debit/credit is never visible in one wallet only; a failed correction leaves no trace (S3-058).
+== S3-055 | corrections | behaviour | ★
+> Increasing the amount debits the original sender; decreasing it debits the original receiver.
+~ Zero amount: the receiver gives back everything.
+== S3-056 | corrections | error | ★
+> A currently unaffordable debit gives 409 `insufficient_funds`.
+~ Evaluated against `available` (stage 2): a receiver whose money is held by an open authorization cannot fund a decrease from the held part. Boundary: exactly the available amount succeeds.
+== S3-057 | corrections | error | ★
+> Otherwise, if any user's corrected balance is negative at any effective-time boundary, return 409 `historical_overdraft`.
+~ Sender side (increase), receiver side (decrease), moving effective_at earlier or later, boundary: exactly zero is fine.
+== S3-058 | corrections | error | ★
+> Balances at a boundary include the combined effect of all movements at that instant.
+~ A user who receives X and sends X at the same effective instant is at 0 there even if the send has the lower payment id; moving a payment onto that instant is accepted, one instant earlier is historical_overdraft. balance_after inside a tie follows the id order (transient negative values are legal there).
+== S3-059 | corrections | error | ★
+> Either failure preserves balances, revision history, statements and idempotency state.
+~ Before/after comparison of /me, full statements, revisions and key reuse (the failed key is a first use afterwards).
+== S3-060 | corrections | concurrency | ★
+> The sum of balances must equal the seeded total in every historical view.
+~ Checked for every (as_of, known_at) pair of the grid, including known_at before anything was recorded and as_of in the future.
+== S3-061 | corrections | behaviour | ★
+> The original payment and every original idempotent response remain unchanged.
+~ Replaying the original POST /payments (and pay/settlement) key still gives 200 with the original amount; payment object in /activity keeps the original amount.
+== S3-062 | corrections | behaviour | ★
+> `GET /activity` continues to display the original payment; correction records are not new feed payments.
+~ Same count, same ids, same order, original amounts, original created_at after any number of corrections.
+== S3-063 | corrections | behaviour | ★
+> `GET /payments/{payment_id}/revisions` returns `{"revisions": [...]}` in revision order, including revision 1 (`reason: ""`).
+~ Reading: each element has the fields of the correction response (revision, amount, effective_at, recorded_at, reason; payment_id if present must match).
+== S3-064 | corrections | behaviour | ★
+> Only the two parties can read it; a third party gets 404 even for a public payment.
+~ Sender and receiver 200; third party and a settlement operator who is not a party: exactly 404 not_found.
+== S3-065 | corrections | error | -
+> No token is 401.
+
+== S3-066 | known_at | behaviour | -
+> `GET /me` and `GET /statement` accept optional `known_at`, an RFC 3339 instant with offset.
+== S3-067 | known_at | behaviour | ★
+> For each payment, select its latest revision recorded **at or before** `known_at`; if none was yet recorded, that payment contributes nothing.
+~ known_at exactly at a recorded_at includes that revision. A payment unknown at known_at contributes to neither party, so sums stay conserved.
+== S3-068 | known_at | behaviour | -
+> Omission means everything known when the read begins.
+== S3-069 | known_at | behaviour | ★
+> Then apply selected revisions according to their **effective** times.
+~ Under known_at after a correction, the corrected effective_at decides whether the payment counts at a given as_of; under an earlier known_at the original one does.
+== S3-070 | known_at | behaviour | -
+> `as_of` retains its inclusive meaning; a statement retains its half-open window.
+== S3-071 | known_at | time | ★
+> Both query instants may be in the future.
+~ as_of and known_at in the future are accepted (200) and behave as "now" for payments; for statements `to` in the future is accepted too.
+== S3-072 | known_at | error | -
+> Invalid/empty instants are 422.
+~ Same value lists as S3-013, for known_at on /me and /statement.
+== S3-073 | known_at | behaviour | ★
+> Echo supplied `known_at` exactly.
+~ /me echoes both as_of and known_at; the statement echoes known_at when supplied.
+== S3-074 | known_at | behaviour | ★
+> Statement ordering is now by selected `effective_at`, then payment id.
+== S3-075 | known_at | behaviour | ★
+> Each entry retains `payment`, `delta` and `balance_after`, and adds the selected `revision`, `effective_at` and `recorded_at`.
+== S3-076 | known_at | behaviour | ★
+> `payment.amount` is the selected amount for this statement.
+~ The rest of the payment object (id, parties, visibility, note, created_at) is the original payment.
+== S3-077 | known_at | behaviour | ★
+> Zero-amount revisions still appear as entries with zero delta.
+== S3-078 | known_at | behaviour | ★
+> No correction is counted alongside the revision it replaces.
+~ One entry per payment; deltas of a corrected payment are not summed with its original.
+== S3-079 | known_at | behaviour | -
+> With no corrections and no `known_at`, previous behavior is unchanged.
+
+== S3-080 | snapshots | behaviour | ★
+> Every first `GET /statement` response additionally returns an opaque `snapshot` token.
+~ Present on every non-snapshot statement response, including empty windows and filtered ones.
+== S3-081 | snapshots | behaviour | ★
+> It freezes the caller's selected revisions, window, balances, entries and default `to` at that read.
+~ Payments created after the read (later than the frozen default `to`) never appear in pages of that token.
+== S3-082 | snapshots | behaviour | ★
+> `GET /statement?snapshot=<token>&limit=...&offset=...` pages that exact result, even after payments or corrections.
+~ Pages carry opening_balance, closing_balance, entries slice and has_more of the frozen result.
+== S3-083 | snapshots | error | ★
+> Only limit and offset may accompany a snapshot; supplying `from`, `to` or `known_at` with it gives 422 `validation_failed`.
+~ Unrecognised parameters stay ignored (S3-087). `as_of` is not a statement parameter and is not probed.
+== S3-084 | snapshots | error | ★
+> Unknown token, another user's token, or a token from before reset gives 404 `not_found`.
+~ Includes a token of the same user id after a reset to the same fixture (new login, old token).
+== S3-085 | snapshots | time | -
+> Tokens last until reset. No storage survival across container restarts is required.
+~ A token is reusable any number of times (repeated and interleaved paging, minutes of use) until reset.
+== S3-086 | snapshots | behaviour | ★
+> Paging changes neither balances nor entries; the final partial page and offsets beyond the end must report `has_more` correctly.
+== S3-087 | snapshots | behaviour | -
+> Unrecognized query parameters remain ignored under stage 1's general rule.
+== S3-088 | snapshots | behaviour | ★
+> A correction may move a payment into or out of a statement window.
+~ A correction changing effective_at moves the entry in/out of [from, to) and shifts opening_balance accordingly; an old snapshot still shows the old window content.
+== S3-089 | snapshots | concurrency | ★
+> Existing snapshots remain unchanged during concurrent payments or corrections.
+~ Reader threads page a token continuously during a storm of payments and corrections; every page equals the first read.
+== S3-090 | snapshots | concurrency | ★
+> Concurrent corrections using the same expected revision cannot both succeed.
+~ Burst with different keys: exactly one 201, the rest 409 stale_revision, exactly one new revision. Burst with one key: one 201, the rest 200 with the same body.
+
+== S3-091 | settlements | behaviour | -
+> Stage-1 settlements retain their original receipts and privacy rules.
+~ Settlement response, member visibility and operator privacy (S1-188, S1-198 … S1-202) are unchanged by the revision machinery.
+== S3-092 | settlements | behaviour | ★
+> Each member's original revision uses its shared committed_at as both effective_at and recorded_at.
+== S3-093 | settlements | error | ★
+> Single-payment corrections reject settlement members with 422 `linked_payment_immutable`.
+~ Reading: by the member's sender; the rejection does not claim the key and changes nothing.
+== S3-094 | settlements | data-migration | ★
+> A stage-3 service must accept exports produced by the same team's stage-1 or stage-2 service.
+~ Needs running old services (PROBE_STAGE1_BASE_URL, PROBE_STAGE2_BASE_URL; run_docker.sh --stage1-ref/--stage2-ref builds them); SKIP otherwise.
+== S3-095 | settlements | data-migration | ★
+> The ledger must import and account for authorizations and captures.
+~ After importing a stage-2 export: statements contain the capture payments (once each, with authorization_id), opening + deltas = closing = old balance, hold state intact, authorizations expose closed_at.
+== S3-096 | settlements | error | ★
+> Captures are immutable linked payments: a correction of a capture gives 422 `linked_payment_immutable`.
+
+== S3-097 | holds | behaviour | ★
+> For `GET /me?as_of=T&known_at=K`, all four money fields describe that same view: `balance = total`, `available = total - held`.
+== S3-098 | holds | time | ★
+> A hold starts at authorization creation;
+~ as_of exactly at creation counts (inclusive).
+== S3-099 | holds | time | ★
+> nonfinal capture reduces it at capture time;
+~ The capture instant is the capture payment's created_at.
+== S3-100 | holds | time | ★
+> final capture, void or expiry releases the remainder at that event's time.
+== S3-101 | holds | time | ★
+> Expiry takes effect at `expires_at`.
+~ as_of = expires_at - 1 s still holds, as_of = expires_at does not.
+== S3-102 | holds | time | ★
+> Events other than clock expiry are known at their server-assigned event time.
+~ known_at before a void/capture hides the event (hold still open, payment absent); at or after reveals it.
+== S3-103 | holds | time | ★
+> Once creation is known, the expiry deadline is known too.
+~ known_at at creation, as_of after expires_at: released.
+== S3-104 | holds | time | ★
+> For queries beyond now, an open hold expires at its deadline.
+~ as_of = now + 60 s keeps a 600 s hold, as_of = deadline + 1 day does not.
+== S3-105 | holds | time | ★
+> Without `as_of`, use the instant the request began.
+~ GET /me?known_at=K alone shows the hold state "now" under knowledge K.
+== S3-106 | holds | behaviour | ★
+> Authorizations expose `closed_at` (null while open; event time when closed).
+~ Created: null; partially captured: null; voided: the void instant (unchanged by a repeated void); final capture: the capture instant; expired: expires_at. Present (key) on every authorization object incl. GET /authorizations.
+== S3-107 | holds | behaviour | ★
+> Historical `total` follows stage-3 effective/recorded-time rules.
+== S3-108 | holds | error | ★
+> A correction is rejected with 409 `historical_overdraft` if it makes either total or available negative at any past effective/event boundary, under the latest known revisions.
+~ Probed with a real hold interval: a correction that leaves total >= 0 but available < 0 while the hold was open is rejected, exactly-zero available is accepted; "under the latest known revisions" is probed by a first correction unlocking a second.
+== S3-109 | holds | error | ★
+> Current unaffordable debits still take precedence as `insufficient_funds`.
+== S3-110 | holds | behaviour | ★
+> Seeded open holds are assumed created at reset unless `created_at` is supplied;
+~ as_of before reset: held 0; after: held. Supplied past created_at: held from then on, not before.
+== S3-111 | holds | behaviour | -
+> seeded closed holds need not reconstruct a prior lifecycle.
+! permissive statement
+== S3-112 | holds | behaviour | ★
+> `GET /statement` still contains money movements only: authorization, release and expiry are not payments.
+== S3-113 | holds | behaviour | ★
+> Captures appear exactly once with their links.
+~ Each capture payment is one entry in the payer's and one in the receiver's statement, with payment.authorization_id.
+== S3-114 | holds | behaviour | ★
+> Old snapshots remain unchanged after any lifecycle action or correction.
+~ Authorize, capture, void and expiry after the token was issued change nothing in its pages.
+
+== S3-115 | carried | idempotency | ★
+> Key reused after the original request failed with 4xx | Treated as a first use
+~ (S1-103 / S1-181 carried to the new path) A correction rejected with 422, 403-free validation, 409 stale_revision, insufficient_funds, historical_overdraft or linked_payment_immutable does not claim its key.
+== S3-116 | carried | idempotency | ★
+> A replay means the same user sending the **same method, the same path and the same body**. The same key with the same body on a different path is a different request, not a replay, and must succeed normally.
+~ (S1-098 carried) The same key and body sent to the corrections path of two different payments creates a revision on each (201, 201).
+== S3-117 | carried | idempotency | -
+> `Idempotency-Key` | 1 to 255 characters | 422 `validation_failed`
+~ (S1-080 carried) 255 accepted, 256 is 422; header absent or empty is 400 missing_idempotency_key.
+== S3-118 | carried | data-migration | ★
+> Preserve accounts and hashed-password login, existing bearer tokens, currency, balances, payments, requests, permissions, all completed idempotent request bodies and original responses.
+~ (S1-179 carried) Export/import of a stage-3 state preserves revision histories (amounts, effective/recorded times, reasons), opening balances, correction receipts (replay 200 with the original body), failed-key reusability, authorizations with closed_at, and historical views; revision numbering and ids continue without collision. Snapshots need not survive.
+== S3-119 | carried | error | -
+> Requests must not produce 5xx responses, including under concurrent load.
+~ (S1-083 carried) the probe client fails any probe that provoked a 5xx; every 4xx body has the standard error shape (S1-067).
+== S3-120 | carried | concurrency | ★
+> The sum of all wallet `total` values always equals the total seeded by the last reset.
+~ (S2-090 carried) Storms mixing payments, corrections, authorizations and captures, with samplers on live statements; no balance or available amount negative at any read.
