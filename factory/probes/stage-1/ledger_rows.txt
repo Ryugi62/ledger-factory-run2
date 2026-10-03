@@ -1,0 +1,567 @@
+# Source of the stage-1 ledger. Format per row:
+#   == ID | section | kind | star(★ or -)
+#   > requirement quoted verbatim (one line)
+#   ~ reading / note (optional, repeatable)
+#   ! manual reason (optional; row has no probe)
+#   @ script (optional; exercised by a shell harness such as run_docker.sh rather than a python probe)
+# `python3 build_ledger.py` renders ../../ledger/stage-1.md and adds the probe column from the probes' @test(...) ids.
+
+== S1-001 | §1 | behaviour | -
+> Users can send money by handle, request money and split bills.
+== S1-002 | §1 | behaviour | -
+> Payments appear in an activity feed with public or private visibility.
+== S1-003 | §1 | behaviour | -
+> Authorized operators can submit groups of transfers as settlements.
+== S1-004 | §1 | behaviour | -
+> Only the HTTP API is required.
+! scope statement, nothing observable to assert
+== S1-005 | §1 | concurrency | ★
+> The sum of wallet balances always equals the total seeded by the last `POST /_test/reset`.
+~ Checked after bursts of every money-moving operation, mixed together, and after export/import. Exact integer sums (no float).
+== S1-006 | §1 | concurrency | ★
+> No wallet balance may be negative, including transiently.
+~ Overdraft bursts (N concurrent spends of a balance that affords fewer than N) plus a sampler reading `GET /me` throughout a storm: no sample may be below 0.
+== S1-007 | §1 | concurrency | ★
+> A payment request may move money at most once.
+~ Concurrent pay with different keys, concurrent pay with the same key, and pay racing decline/cancel.
+== S1-008 | §1 | behaviour | -
+> All amounts are exact integer counts of minor units.
+== S1-009 | §1 | behaviour | -
+> Deposits, top-ups, withdrawals, cards and bank integrations are out of scope. Money moves only between existing wallets.
+~ Observable consequence: total supply never changes (S1-005).
+== S1-010 | §2 | behaviour | -
+> Deliver an HTTP service, a `Dockerfile` and a `RUN.md` with a command that builds and starts the service without manual setup.
+~ File presence is probed; the build-and-start command itself is exercised by run_docker.sh.
+== S1-011 | §2 | behaviour | -
+> The image must run on its own with `-e PORT=<port>` and a port mapping.
+@ run_docker.sh
+== S1-012 | §2 | behaviour | ★
+> All runtime dependencies, initialization and seed data must work within that single container.
+@ run_docker.sh --offline
+~ run_docker.sh --offline runs the image on a docker network with no outbound route and drives the probes from a sibling container.
+== S1-013 | §2 | behaviour | -
+> Runtime networking has no outbound access.
+@ run_docker.sh --offline
+~ Reading: the service must not need the network at run time (fonts/assets/deps/DB all in the image).
+== S1-014 | §2 | behaviour | -
+> Compose configuration is not used to start the service.
+! informational: nothing observable beyond the image running on its own (S1-011)
+== S1-015 | §2 | time | ★
+> Start to first healthy response | 60 s
+~ run_all.py waits for /health up to 60 s; run_docker.sh measures from `docker run`.
+== S1-016 | §2 | limit | ★
+> Concurrent requests | up to 50 in flight
+~ 50 simultaneous requests of each kind (health, GET /me, /activity, logins, payments) return no 5xx and no timeout.
+== S1-017 | §2 | time | ★
+> Per-request timeout | 5 s (10 s for `POST /_test/reset`)
+~ Every probe request is timed; any request slower than 5 s (10 s for reset/export/import) fails the probe. Includes a reset of 200 users (password hashing must not blow 10 s) and 50 concurrent logins.
+== S1-018 | §2 | limit | -
+> CPU | 2 vCPU
+@ run_docker.sh
+~ run_docker.sh starts the container with --cpus 2.
+== S1-019 | §2 | limit | -
+> Memory | 2 GiB
+@ run_docker.sh
+~ run_docker.sh starts the container with --memory 2g.
+== S1-020 | §2 | behaviour | -
+> Disk | ephemeral; state need not survive a container restart
+! permissive statement; nothing to assert
+== S1-021 | §2 | behaviour | -
+> Runtime assets and dependencies must be included in the image.
+@ run_docker.sh --offline
+== S1-022 | §3.1 | behaviour | -
+> Listen on `0.0.0.0` using the `PORT` environment variable, default `8080`.
+@ run_docker.sh
+~ run_docker.sh runs once with -e PORT=<custom> and once with no PORT (expects 8080); host port mapping only reaches a 0.0.0.0 listener.
+== S1-023 | §3.2 | behaviour | -
+> GET /health  ->  200  {"status": "ok"}
+~ Body is exactly {"status": "ok"}; no auth needed.
+== S1-024 | §3.2 | time | ★
+> Return 200 once the service and its data store can serve requests, within 60 seconds of container start.
+~ Reading: the first 200 from /health means reset, signup and login work immediately afterwards.
+== S1-025 | §3.2 | behaviour | -
+> Non-200 responses are permitted before the service is ready.
+! permissive statement
+== S1-026 | §3.3 | behaviour | -
+> POST /_test/reset ... ->  204 No Content
+~ Empty body on 204.
+== S1-027 | §3.3 | behaviour | ★
+> Replace all service state with the fixture in the request body (§4). When reset returns 204, subsequent requests must see only that fixture.
+~ After a second reset: old users/handles/emails gone, old tokens invalid (401), old payments/requests gone, signup-created accounts gone, handle free again, old idempotency keys unclaimed, old operators gone. Reading: tokens and idempotency records are service state.
+== S1-028 | §3.3 | behaviour | -
+> Repeated resets are supported.
+== S1-029 | §3.3 | behaviour | -
+> This test endpoint must be enabled in the delivered image and requires no authentication.
+== S1-030 | §3.4 | behaviour | ★
+> Requests and responses are `application/json; charset=utf-8`.
+~ Every non-204 response (success and error) carries Content-Type application/json with charset utf-8.
+== S1-031 | §3.4 | time | ★
+> Timestamps in responses are RFC 3339 with an explicit offset, e.g. `2026-09-24T19:00:00+02:00`.
+~ Reading: numeric offset `±HH:MM` required (the spec's own example); a bare `Z` is flagged. The instant must be within 5 minutes of the probe host's clock.
+== S1-032 | §3.4 | behaviour | ★
+> Unknown fields in a request body are ignored, never an error.
+~ Probed on every body-taking endpoint, including auth, reset, settlements and transfer entries.
+== S1-033 | §3.4 | behaviour | -
+> Unknown query parameters are ignored.
+== S1-034 | §3.4 | limit | -
+> IDs are opaque strings of at most 64 characters.
+== S1-035 | §4 | behaviour | ★
+> The service has **one currency**, declared in the fixture. Every amount in the API is an integer count of its minor units
+~ EUR/2, JPY/0 and BHD/3 fixtures: /me and every payment/request/split/settlement body echoes the fixture currency and minor_units; amounts are echoed unscaled.
+== S1-036 | §4 | behaviour | ★
+> API amounts must have an integral numeric value: JSON `1000`, `1000.0` and `1e3` all represent the same valid minor-unit amount.
+~ Probed with raw request bodies on payments, requests, splits and settlement entries. Response amounts must be integers (JSON integer literals). Non-integral values (1000.5, 1e-1) are 422.
+== S1-037 | §4 | error | -
+> Booleans and strings are not numbers here.
+~ Per §5 these are 422 validation_failed (not 400).
+== S1-038 | §4 | behaviour | ★
+> Every user has a **handle**: unique across the service, matching `^[a-z0-9_]{1,20}$`, and never changing once set.
+~ Handles in /me and payment bodies match the regex; two concurrent signups whose derived handles collide yield exactly one account (409 handle_taken for the rest); a handle is stable across sessions and operations.
+== S1-039 | §4 | behaviour | -
+> Users identify recipients by handle.
+== S1-040 | §4 | behaviour | -
+> Directory and user-search endpoints are out of scope.
+! out of scope
+== S1-041 | §4 | behaviour | -
+> Seeded users take their handle from the fixture.
+== S1-042 | §4 | behaviour | ★
+> take the local part, lowercase it, replace every character outside `[a-z0-9_]` with `_`, and truncate to 20 characters.
+~ Reading: "character" = Unicode code point (one `_` per code point, not per byte or UTF-16 unit); truncation happens after replacement; the email's own case is irrelevant. Probed: dots, plus, hyphen, uppercase, é, an emoji, a 25-char local part.
+== S1-043 | §4 | behaviour | -
+> New users start with a balance of `0`. They can receive money and be asked for money immediately.
+== S1-044 | §4 | behaviour | -
+> A **payment** moves money from one wallet to another, immediately and atomically. It is either sent directly or created by paying a request.
+== S1-045 | §4 | behaviour | -
+> A request is `pending`, and then exactly one of `paid`, `declined` or `cancelled`.
+~ Terminal states stay terminal (no pending again, no paid→cancelled, etc.).
+== S1-046 | §4 | error | -
+> Only the payer may pay or decline it; only the requester may cancel it.
+== S1-047 | §4 | behaviour | ★
+> **A request may exceed the payer's balance.** That is a legal state, not an error at creation time:
+~ Probed with amount 1000000000 against a payer holding 0.
+== S1-048 | §4 | behaviour | ★
+> the request stays `pending` until it is paid, declined or cancelled, and an attempt to pay it while short is `409 insufficient_funds` and changes nothing.
+~ "Changes nothing": request still pending with payment_id null, both balances unchanged, no payment in either feed.
+== S1-049 | §4 | behaviour | ★
+> Money can arrive later and the same request then becomes payable.
+~ Includes: same Idempotency-Key reused after the 409 is a first use (S1-103) and returns 201.
+== S1-050 | §4 | behaviour | ★
+> **Visibility belongs to the payment, not the request.** The payer chooses it when the money moves.
+~ The request carries no visibility field; a `visibility` sent when creating a request is an unknown field and is ignored (even an invalid value). The paid payment's visibility is whatever the payer sent to /pay (default public).
+== S1-051 | §4 | behaviour | ★
+> A request carries no visibility of its own and never appears in anyone else's feed.
+== S1-052 | §4 | behaviour | ★
+> A payment appears for a caller **if and only if** its `visibility` is `public`, **or** the caller is its sender or its receiver.
+~ Matrix over public/private × sender/receiver/third party, including payments created by paying a request, by settlement, and seeded by the fixture.
+== S1-053 | §4 | behaviour | -
+> There is no other rule, no follow graph and no mute list.
+~ A brand-new user with no relationship to anyone sees every public payment and no private one.
+== S1-054 | §4 | behaviour | -
+> Requests never appear in the activity feed; they are read through `GET /requests`, which returns only requests where the caller is the requester or the payer.
+== S1-055 | §4 | behaviour | ★
+> A split is not a feed item. The requests it creates are visible to their own two parties, and the payments that eventually fulfil them follow the rule above.
+== S1-056 | §4 | behaviour | -
+> Visibility is **one value on the payment**, seen identically by both parties and by everyone else.
+== S1-057 | §4 | behaviour | -
+> A `private` payment is hidden from third parties, not from its own receiver.
+== S1-058 | §4 | limit | ★
+> `amount` is at most `1000000000` on any single request
+~ 1000000000 accepted on payments, requests, splits, settlement entries; 1000000001 is 422 on each.
+== S1-059 | §4 | limit | ★
+> no operation produces a balance outside ±2⁵³. Monetary arithmetic must preserve exact minor-unit values without rounding error.
+~ Fixture with balances around 9·10^15 (odd values): exact balances after payments, requests, settlements, export/import (a float32 or a lossy JSON round trip fails).
+== S1-060 | §4 | behaviour | -
+> Seeded users must be able to log in with the given password immediately.
+== S1-061 | §4 | behaviour | ★
+> `balance` is the wallet balance **after** every seeded payment has been applied. Seeded numbers are consistent; you do not replay seeded payments against balances.
+~ /me balance equals the fixture balance exactly even though the fixture also lists payments.
+== S1-062 | §4 | error | ★
+> A `balance` below zero in a fixture is a reset error: return `422 validation_failed` from `POST /_test/reset` and change nothing.
+~ "Change nothing": prior users, tokens, balances and payments are all still there afterwards.
+== S1-063 | §4 | behaviour | -
+> `minor_units` is `0`, `2` or `3`. Fixtures use `EUR` (2), `JPY` (0) and `BHD` (3).
+== S1-064 | §4 | behaviour | -
+> An administrative balance endpoint is out of scope.
+! out of scope
+== S1-065 | §4 | behaviour | -
+> "payments": [ { "id": "p_1", "from_user_id": "u_ada", "to_user_id": "u_bob", "amount": 500, "note": "coffee", "visibility": "public" } ]
+~ Reading of the fixture format: seeded payments are real payments: `id` becomes `payment_id`, they show in the feed under the visibility rule with amount/note/handles; seeded requests likewise keep `id`, status and amounts (pending ones are payable; declined/cancelled/paid ones answer 409 request_not_pending to pay).
+== S1-066 | §4 | behaviour | ★
+> "settlement_operator_ids"
+~ Reading: `payments`, `requests` and `settlement_operator_ids` may each be omitted and default to empty (the spec states the default only for operators). A fixture with only currency, minor_units and users resets cleanly.
+== S1-067 | §5 | error | -
+> Every 4xx and 5xx response carries this body: { "error": { "code": "insufficient_funds", "message": "human readable, any wording" } }
+~ Every error response seen by any probe is checked: JSON object with exactly an `error` object holding string `code` and string `message`. Includes 404 for unknown routes? No: only specified endpoints are checked.
+== S1-068 | §5 | error | -
+> 400 | `malformed_request` | Unparseable body, or a field of the wrong JSON type
+~ Reading: a top-level JSON value that is not an object (e.g. `[]`) is a wrong-typed body → 400. Wrong-typed field examples: to_handle number, participant_handles string, email number. Probes always send a valid Idempotency-Key and token so the 400 cannot be confused with other 400/401 causes.
+== S1-069 | §5 | error | -
+> 400 | `missing_idempotency_key` | Required `Idempotency-Key` header absent or empty
+== S1-070 | §5 | error | -
+> 401 | `unauthenticated` | Missing, malformed or unknown bearer token
+~ Missing header, `Bearer` with no token, `Basic ...`, bare token without scheme, unknown token; on every authenticated endpoint.
+== S1-071 | §5 | error | -
+> 403 | `forbidden` | Authenticated, but not permitted to touch this resource
+== S1-072 | §5 | error | ★
+> 404 | `not_found` | No such resource, or not visible to this caller
+~ Reading: pay/decline/cancel by a user who is NOT a party to the request: the endpoint tables say 403 for "not the payer/requester", the generic table allows 404 for "not visible"; the probe accepts 403 or 404 for a stranger, but requires exactly 403 for the OTHER party (requester calling pay/decline, payer calling cancel). Unknown request id is 404 on pay, decline and cancel.
+== S1-073 | §5 | error | -
+> 409 | `idempotency_key_reuse` | Key already used by this caller with a different request body
+== S1-074 | §5 | error | -
+> 422 | `validation_failed` | A required field or query parameter is missing, or a stated rule is violated with no more specific code
+== S1-075 | §5 | error | -
+> A field of the correct JSON type with an invalid format or out-of-range value gives 422 `validation_failed`, unless an endpoint specifies a different error.
+== S1-076 | §5 | error | ★
+> Endpoint-specific field rules take precedence: invalid `amount` values (including strings and booleans), non-string `note` values (including `null`), and any `visibility` other than `public` or `private` are 422 `validation_failed`.
+~ So amount "100"/true/null/[] → 422 (not 400); note null/5/[] → 422 (not 400); visibility null/5/"PUBLIC" → 422.
+== S1-077 | §5 | error | ★
+> Omission alone selects the optional-field defaults.
+~ `note: null` and `visibility: null` are NOT omission.
+== S1-078 | §5 | error | ★
+> An integer-valued **query parameter** is written as plain decimal digits: `1e9`, `4.0` and `+4` are 422 `validation_failed` whatever their numeric value.
+== S1-079 | §5 | error | -
+> Reserve 400 `malformed_request` for a body that does not parse or a field of the wrong type.
+== S1-080 | §5 | limit | ★
+> `Idempotency-Key` | 1 to 255 characters | 422 `validation_failed`
+~ 255 chars accepted, 256 is 422, on all five idempotent paths.
+== S1-081 | §5 | limit | -
+> `limit` | integer 1 to 200 | 422 `validation_failed`
+== S1-082 | §5 | limit | -
+> `offset` | integer 0 or more | 422 `validation_failed`
+== S1-083 | §5 | error | ★
+> Requests must not produce 5xx responses, including under concurrent load.
+~ The probe client records every 5xx on every request of every probe; any 5xx fails the probe that provoked it.
+== S1-084 | §6 | behaviour | -
+> Authentication supports signup and login.
+== S1-085 | §6 | behaviour | -
+> ->  201  { "user_id": "u_1", "display_name": "Ada", "token": "..." }
+~ Signup response: 201 with user_id, display_name (echoed), non-empty string token; token works immediately on /me; the account can log in.
+== S1-086 | §6 | behaviour | -
+> ->  200  { "user_id": "u_1", "display_name": "Ada", "token": "..." }
+~ Login response: 200, same user_id as signup, working token. Seeded users log in with fixture display_name.
+== S1-087 | §6 | error | -
+> Email already registered | 409 `email_taken`
+~ Reading: when an email is re-registered, the derived handle is necessarily taken by that same account; `email_taken` is the unconditional row for that case and is what the probe expects. Fixture emails count as registered.
+== S1-088 | §6 | error | ★
+> Password shorter than 8 characters | 422 `validation_failed`
+~ Characters, not bytes: 7 two-byte characters is 422; exactly 8 characters (even if ASCII) is 201.
+== S1-089 | §6 | error | -
+> `email` not of the form `local@domain` | 422 `validation_failed`
+~ Clearly invalid only: no `@`, empty local part, empty domain. Missing email/password/display_name is 422 (missing required field); wrong JSON type is 400.
+== S1-090 | §6 | error | -
+> Wrong password or unknown email on login | 401 `unauthenticated`
+~ Includes a password that agrees with the real one on the first 72 bytes (bcrypt truncation) but differs afterwards.
+== S1-091 | §6 | error | ★
+> The handle derived from the email (§4) is already taken | 409 `handle_taken`, and no account is created
+~ Against a seeded handle and against an earlier signup. No account created: login with the rejected email is 401, and re-signup of the same email is still handle_taken (not email_taken).
+== S1-092 | §6 | behaviour | -
+> Every other endpoint requires a bearer token, except `/health`, `/_test/reset` and the two above.
+~ /_test/export and /_test/import are also unauthenticated per §10.
+== S1-093 | §6 | behaviour | -
+> Wallet API endpoints require authentication.
+== S1-094 | §6 | behaviour | ★
+> Tokens do not expire. An account may have multiple valid tokens and concurrent sessions.
+~ Signup token still valid after a later login; two logins give two working tokens; 20 concurrent logins all yield working tokens.
+== S1-095 | §6 | behaviour | ★
+> Passwords must be stored using a password-hashing function such as bcrypt, scrypt or Argon2, or an equivalent. Plaintext password storage is not permitted.
+~ Black-box proxy: the unauthenticated /_test/export (which may contain credentials, §10) must not contain any plaintext password. Probed with a distinctive password at signup and in the fixture. Hash quality itself is manual review.
+== S1-096 | §7 | idempotency | -
+> Five write paths require an idempotency key (§8 and §11): **`POST /payments`**, **`POST /requests`**, **`POST /requests/{id}/pay`**, **`POST /splits`** and **`POST /settlements`**.
+~ The §7 behaviours are probed as a matrix over all five paths.
+== S1-097 | §7 | idempotency | ★
+> The key is scoped to **the authenticated user**. Two different users may use the same key string with no interaction between them.
+~ Two users, same key, different bodies: both 201, both effects happen. Same key, same body from two users is two first uses (each 201), not a replay.
+== S1-098 | §7 | idempotency | ★
+> A replay means the same user sending the **same method, the same path and the same body**. The same key with the same body on a different path is a different request, not a replay, and must succeed normally.
+~ Same key+body to /payments and /requests (a body valid for both); same key+`{}` to /requests/A/pay and /requests/B/pay: all 201 with different resources.
+== S1-099 | §7 | idempotency | -
+> Header absent or empty | 400 `missing_idempotency_key`
+~ Valid token and body, header absent / present-but-empty, on all five paths; no side effects.
+== S1-100 | §7 | idempotency | -
+> First use of the key | The normal response, **201**
+== S1-101 | §7 | idempotency | ★
+> Replay: same key, same body | **200**, body identical to the original response as a JSON value
+~ Includes payment_id/request_id/split_id/settlement_id/created_at/committed_at identical; resources are not duplicated.
+== S1-102 | §7 | idempotency | -
+> Same key, different body | 409 `idempotency_key_reuse`
+== S1-103 | §7 | idempotency | ★
+> Key reused after the original request failed with 4xx | Treated as a first use
+~ 422, 404, 403 and 409 insufficient_funds failures do not claim the key; the same key later succeeds with 201 (also with a different body).
+== S1-104 | §7 | idempotency | ★
+> "Same body" means the same JSON value after parsing — key order and whitespace do not matter.
+== S1-105 | §7 | concurrency | ★
+> For concurrent identical requests with an unused key, exactly one returns 201. The others return 200 with the same body. The operation takes effect only once.
+~ 20 simultaneous identical requests on each of the five paths: one 201, nineteen 200, identical bodies, single effect (balance / counts).
+== S1-106 | §7 | idempotency | ★
+> A successful replay returns the original response, even after the resource changes or is cancelled. It makes no further state changes.
+~ Replay of /requests after cancel returns the original body (status pending); replay of /payments after the sender was drained still 200; replay of /pay after the request is paid.
+== S1-107 | §7 | idempotency | ★
+> After the body has parsed as a JSON object and the caller is authenticated, an already claimed key is resolved before endpoint field validation or current-resource checks. Thus changing a successful request to an invalid body with the same key still returns `409 idempotency_key_reuse`.
+== S1-108 | §8 | behaviour | -
+> { "user_id": "u_ada", "display_name": "Ada", "handle": "ada", "balance": 10000, "currency": "EUR", "minor_units": 2 }
+~ GET /me response fields and types; balance is an exact integer.
+== S1-109 | §8 | behaviour | ★
+> `note` is optional and defaults to `""`. `visibility` is optional and defaults to `"public"`.
+== S1-110 | §8 | behaviour | -
+> "payment_id": "p_7", "from_user_id": "u_ada", "from_handle": "ada", "to_user_id": "u_bob", "to_handle": "bob", "amount": 1500, "currency": "EUR", "note": "dinner", "visibility": "public", "request_id": null, "created_at": "2026-09-24T11:04:03+00:00"
+~ POST /payments 201 body: all those keys with correct values; request_id is null; debit/credit visible on /me of both users. `settlement_id` is also present (null) because §11 says non-members "expose null for that field".
+== S1-111 | §8 | error | -
+> The caller's balance is below `amount` | 409 `insufficient_funds`
+~ Boundary: paying exactly the whole balance succeeds (balance 0), one more minor unit fails. Failure leaves no trace.
+== S1-112 | §8 | error | -
+> `amount` below 1, above 1000000000, or not an integer | 422 `validation_failed`
+~ 0, -1, 1000000001, 1.5, "10", true, null, [], {}, missing. (amount missing → 422 as missing required field.)
+== S1-113 | §8 | error | ★
+> `to_handle` is the caller's own handle | 422 `self_payment`
+~ Reading: self_payment is decided before the balance check (an own-handle payment larger than the balance is still 422 self_payment); unknown handle (404) likewise precedes insufficient_funds.
+== S1-114 | §8 | limit | ★
+> `note` longer than 200 characters | 422 `validation_failed`
+~ Reading: characters = Unicode code points. 200 ASCII and 200 emoji (800 bytes, 400 UTF-16 units) accepted; 201 rejected. Applied to payments, requests, splits and settlement transfers.
+== S1-115 | §8 | error | -
+> `visibility` is neither `public` nor `private` | 422 `validation_failed`
+== S1-116 | §8 | error | -
+> No user has that handle | 404 `not_found`
+== S1-117 | §8 | behaviour | ★
+> The debit and the credit are one atomic step. A payment is never visible in one wallet and not the other, and a failed payment leaves no trace in either.
+~ Failed payments (409/404/422) change neither balance and add no feed item; after bursts every balance equals seed minus sent plus received computed from the feed, exactly.
+== S1-118 | §8 | behaviour | ★
+> `note` is stored and returned verbatim: no trimming, no escaping, no normalisation. Unicode and emoji survive a round trip byte for byte.
+~ Leading/trailing spaces, HTML, backslashes, newlines/tabs, quotes, emoji with skin-tone/ZWJ, NFC vs NFD forms kept distinct; checked in the payment response, in /activity and in the receiver's feed, and on requests/splits.
+== S1-119 | §8 | behaviour | -
+> The caller is the requester.
+~ POST /requests 201 body: request_id, requester_id/handle (caller), payer_id/handle, amount, currency, note, status "pending", payment_id null, created_at.
+== S1-120 | §8 | error | -
+> `amount` below 1, above 1000000000, or not an integer | 422 `validation_failed`
+~ Same set as S1-112 on POST /requests.
+== S1-121 | §8 | error | ★
+> `payer_handle` is the caller's own handle | 422 `self_request`
+== S1-122 | §8 | error | -
+> `note` longer than 200 characters | 422 `validation_failed`
+~ POST /requests.
+== S1-123 | §8 | error | -
+> No user has that handle | 404 `not_found`
+~ POST /requests with unknown payer_handle; also POST /splits and settlement entries (S1-154, S1-193).
+== S1-124 | §8 | behaviour | ★
+> **The payer's balance is not checked here.** A request for more than the payer holds is created normally and sits `pending`.
+~ Creating a request changes no balance and no feed.
+== S1-125 | §8 | error | -
+> **An idempotent write path.** Only the payer may call it.
+== S1-126 | §8 | behaviour | ★
+> The body carries `visibility` only, optional, default `"public"`. It is the payer's choice, not the requester's.
+== S1-127 | §8 | idempotency | ★
+> **A replay must send the identical body** — `{}` and `{"visibility": "public"}` are different JSON values, so reusing a key across the two is `409 idempotency_key_reuse`, per §7.
+== S1-128 | §8 | behaviour | -
+> Returns `201` with the created **payment**, exactly as `POST /payments` returns one, with `request_id` set to this request. The request becomes `paid` and carries the new `payment_id`.
+~ Payment goes payer→requester for the request amount; GET /requests then shows status paid and payment_id equal to the returned payment_id.
+== S1-129 | §8 | error | -
+> The request is not `pending` | 409 `request_not_pending`
+~ Declined, cancelled and already-paid (second pay with a different key).
+== S1-130 | §8 | error | -
+> The payer's balance is below `amount` | 409 `insufficient_funds`
+~ Boundary: balance == amount succeeds.
+== S1-131 | §8 | error | -
+> The caller is not the request's payer | 403 `forbidden`
+== S1-132 | §8 | error | -
+> Unknown request | 404 `not_found`
+== S1-133 | §8 | idempotency | ★
+> Replaying a successful payment returns 200 with its original payment body, including when the request is already `paid`. It moves no additional money and must not return `409 request_not_pending`.
+== S1-134 | §8 | behaviour | -
+> Only the payer. No idempotency key. Returns `200` with the request, `status: "declined"`.
+~ Works without an Idempotency-Key header and with no request body at all (reading: decline/cancel take no body, so a bare POST is not "unparseable").
+== S1-135 | §8 | behaviour | ★
+> Declining an already-declined request is `200` with the current state — declining twice is not an error.
+== S1-136 | §8 | error | -
+> A `paid` or `cancelled` request is `409 request_not_pending`. Not the payer is `403 forbidden`.
+== S1-137 | §8 | behaviour | -
+> Only the requester. No idempotency key. Returns `200` with the request, `status: "cancelled"`.
+== S1-138 | §8 | behaviour | ★
+> Cancelling an already-cancelled request is `200`.
+== S1-139 | §8 | error | -
+> A `paid` or `declined` request is `409 request_not_pending`. Not the requester is `403 forbidden`.
+== S1-140 | §8 | behaviour | -
+> Requests where the caller is the requester or the payer, and no others.
+~ Operators and strangers see none of them; a split's requests are visible to the requester and to each payer only.
+== S1-141 | §8 | behaviour | ★
+> Newest first by `created_at`.
+~ Reading: GET /requests (unlike /activity) states no tie rule, so requests created back-to-back in the same second must come back in strict reverse creation order. Probe: 6 sequential requests; also pages via limit/offset reassemble to the full list with no gaps or duplicates.
+== S1-142 | §8 | behaviour | -
+> `direction` is `incoming` (the caller is the payer), `outgoing` (the caller is the requester) or absent for both.
+== S1-143 | §8 | behaviour | -
+> `status` is one of the four statuses, or absent for all.
+== S1-144 | §8 | limit | ★
+> `limit` defaults to 50, range 1 to 200. `offset` defaults to 0 and must be 0 or more. Outside either range is 422 `validation_failed`. An unknown `direction` or `status` value is also 422.
+~ 51 requests → default page has 50; limit 1/200 accepted, 0/201 rejected; offset -1 rejected; direction=sideways, status=open rejected.
+== S1-145 | §8 | behaviour | ★
+> `has_more` is true when items exist beyond the last one returned.
+~ Exactly `limit` items remaining → false; one more → true; offset past the end → empty list and false (200).
+== S1-146 | §8 | behaviour | -
+> { "requests": [ { ...request... } ], "has_more": false }
+== S1-147 | §8 | behaviour | -
+> **An idempotent write path.** Splits an amount the caller already paid, and asks each of the other participants for their share by creating one `pending` request each.
+~ Creating a split moves no money.
+== S1-148 | §8 | behaviour | -
+> "split_id": "sp_2", "amount": 3000, "currency": "EUR", "note": "dinner", "shares": [ { "handle": "ada", "amount": 1000 }, ... ], "requests": [ { ...request for bob... }, { ...request for cy... } ], "created_at": "2026-09-24T11:11:00+00:00"
+== S1-149 | §8 | behaviour | ★
+> The caller may be included in `participant_handles` or omitted. Shares follow the equal-split rule in §9, in the order the handles are given. **A request is created for every participant except the caller**, each for that participant's share, with the caller as requester.
+~ Reading: when the caller is omitted the share count n is the number of listed handles (3000 among [bob, cy] is 1500 + 1500), and `shares` lists exactly the listed handles.
+== S1-150 | §8 | behaviour | -
+> `shares` covers every participant including the caller, in the order given, and always sums to `amount`. `requests` covers every participant except the caller, in the same order.
+~ Each request's payer_handle/amount matches the corresponding non-caller share; requester is the caller.
+== S1-151 | §8 | error | -
+> `amount` below 1, above 1000000000, or not an integer | 422 `validation_failed`
+~ POST /splits.
+== S1-152 | §8 | error | -
+> `participant_handles` empty, or containing a duplicate handle | 422 `validation_failed`
+~ Duplicate including the caller listed twice. participant_handles of the wrong JSON type (string/number) is 400.
+== S1-153 | §8 | error | -
+> `note` longer than 200 characters | 422 `validation_failed`
+~ POST /splits.
+== S1-154 | §8 | error | -
+> Any handle is unknown | 404 `not_found`
+~ Atomic: with the unknown handle last, no request was created for the earlier participants, and the key stays unclaimed.
+== S1-155 | §8 | behaviour | ★
+> A split whose only participant is the caller is **valid**: it computes one share, creates zero requests, and returns `"requests": []`.
+== S1-156 | §8 | behaviour | ★
+> Nothing about a split checks anyone's balance.
+~ A 1000000000 split among users holding 0 succeeds; the caller's balance does not need to cover it.
+== S1-157 | §8 | behaviour | -
+> Payments visible to the caller by the feed contract in §4, newest first by `created_at`.
+~ Non-increasing created_at; payment fields as in POST /payments.
+== S1-158 | §8 | behaviour | -
+> The relative order of two payments created within the same second is unspecified. Stable pagination during concurrent writes is not required for this endpoint.
+! permissive statement; probes assert only non-increasing created_at and page sizes
+== S1-159 | §8 | behaviour | ★
+> { "payments": [ { ...payment... } ], "has_more": false }
+~ /activity limit/offset/has_more behave exactly as in /requests (default 50 with 60 seeded payments, 200 max, 422 outside, unknown query params ignored).
+== S1-160 | §9 | behaviour | ★
+> Shares must be whole minor units, sum exactly to `amount` and differ by at most one minor unit.
+~ Property probe over many (amount, n) pairs including 1e9 among 7, with and without the caller among the participants.
+== S1-161 | §9 | behaviour | ★
+> When the amount does not divide evenly, the larger shares go to the first participants in `participant_handles` order.
+== S1-162 | §9 | behaviour | -
+> 1000 | 3 | 334, 333, 333
+== S1-163 | §9 | behaviour | ★
+> 1 | 3 | 1, 0, 0
+== S1-164 | §9 | behaviour | -
+> 10 | 3 | 4, 3, 3
+== S1-165 | §9 | behaviour | -
+> 999 | 3 | 333, 333, 333
+== S1-166 | §9 | behaviour | -
+> 5 | 5 | 1, 1, 1, 1, 1
+== S1-167 | §9 | behaviour | ★
+> Splitting the same amount among the same people in a different `participant_handles` order gives the extra unit to a different person.
+== S1-168 | §9 | behaviour | ★
+> A share of `0` is legal and still produces a request for that participant.
+~ Request with amount 0, status pending, visible to its payer, who can decline it. (Paying a zero request is unspecified and not probed.)
+== S1-169 | §9 | behaviour | ★
+> Each split's shares are independent of previous splits. After any number of splits have been paid in full, wallet balances must still sum exactly to the seeded total.
+~ Two consecutive 1-among-3 splits both give the extra unit to the first handle (no rotating remainder); pay every request of many splits, then the sum is unchanged.
+== S1-170 | §10 | behaviour | -
+> The service must support `GET /_test/export` and `POST /_test/import`. Like reset, these are unauthenticated test endpoints.
+== S1-171 | §10 | behaviour | -
+> Return 200 from export with a JSON object containing `track: "pocketful"`, `format_version: 1` and `state` (an implementation-defined JSON object). The state format is opaque to the caller and must be accepted unchanged by import.
+== S1-172 | §10 | data-migration | -
+> Import takes that entire object and atomically replaces the service's state, returning 204. It must accept an unchanged export produced by this service.
+~ Empty body on 204. The export body is sent back byte-for-byte as parsed and re-serialised JSON.
+== S1-173 | §10 | data-migration | ★
+> No dependency on the source process, files, volume, port or network address is allowed.
+~ run_docker.sh exports from one container and imports into a second one (different process, port and container filesystem), then replays logins, tokens and idempotent retries. Needs PROBE_BASE_URL_2; skipped otherwise (reported as SKIP, not PASS).
+== S1-174 | §10 | data-migration | ★
+> Import is replacement, not merge; repeating it restores the exported state without duplicating anything.
+== S1-175 | §10 | error | -
+> Invalid JSON follows §5;
+~ Unparseable import body → 400 malformed_request, destination unchanged.
+== S1-176 | §10 | error | ★
+> missing fields, wrong track/version or an invalid state give 422 `validation_failed` without changing the destination.
+~ `{}`, missing track/format_version/state, track "other", format_version 2 and "1", state a string/number/null and an object that is not a state of this service (`{"nonsense": true}`); afterwards balances, tokens and payments are unchanged. Reading: an object this service never produced is an "invalid state".
+== S1-177 | §10 | time | -
+> Test control calls have a 10-second timeout.
+~ Export and import of a state with 200 users, 300 payments and 100 requests complete in under 10 s.
+== S1-178 | §10 | concurrency | ★
+> Export is an atomic, read-only snapshot; subsequent source writes do not change it.
+~ (a) Writes after an export do not alter it (import it back and the later writes are gone); (b) exports taken during a payment storm each import to a state whose balances sum to the seeded total with no negative balance; (c) export does not alter service state.
+== S1-179 | §10 | data-migration | ★
+> Preserve accounts and hashed-password login, existing bearer tokens, currency, balances, payments, requests, permissions, all completed idempotent request bodies and original responses.
+== S1-180 | §10 | data-migration | ★
+> Identities, timestamps and monetary records must not be regenerated or replayed against an already-net balance.
+~ After import: same payment_ids, request_ids, split_ids, settlement_ids, created_at values and feed order; balances exactly as exported (not adjusted by replaying payments); new resources created afterwards get ids not colliding with imported ones.
+== S1-181 | §10 | data-migration | ★
+> Failed request keys remain reusable.
+~ A key that failed with 4xx before the export is still a first use (201) after import.
+== S1-182 | §10 | data-migration | ★
+> Existing receipts, tokens and retries must remain valid after import; replacing the state with a fresh fixture does not satisfy this requirement.
+~ Importing into a service that was reset to a DIFFERENT fixture still works: old tokens valid, old keys replay with 200 and identical bodies, same key + different body still 409.
+== S1-183 | §10 | data-migration | -
+> Import removes all previous destination data and credentials.
+~ Users, tokens, payments and keys that existed only in the destination before import are gone (401 on their tokens, 401 on their logins, handles free).
+== S1-184 | §10 | data-migration | -
+> Reset clears all state, including imported state.
+~ After import then reset: imported users, tokens, payments, keys, operators are gone; old key reuse is a first use.
+== S1-185 | §10 | behaviour | -
+> State need not survive an abrupt container restart.
+! permissive statement
+== S1-186 | §11 | behaviour | ★
+> The reset fixture may include `settlement_operator_ids`, an array of user ids, default `[]`.
+~ With the default nobody is an operator, including users created by signup.
+== S1-187 | §11 | behaviour | -
+> An operator may execute a settlement across any wallets.
+~ The operator need not be a party to any transfer.
+== S1-188 | §11 | behaviour | ★
+> This permission does not grant access to another user's requests or private activity items.
+~ Operator's GET /requests and GET /activity contain only their own parties' items; operator cannot pay/decline/cancel others' requests; settlement member payments marked private are absent from the operator's feed unless the operator is a party, although the settlement response itself lists them.
+== S1-189 | §11 | error | -
+> `POST /settlements` requires an operator and an idempotency key. No token gives 401; authenticated non-operator gives 403 `forbidden`.
+~ Probes always supply the key so 400/401/403 are not confused.
+== S1-190 | §11 | limit | ★
+> transfers contains 1..32 objects.
+~ 1 and 32 accepted, 0 and 33 are 422; missing, non-array, and non-object entries are 422 (§11 malformed batch shape).
+== S1-191 | §11 | behaviour | -
+> Each uses ordinary payment amount, note and visibility rules (defaults: empty note, public).
+~ Same amount (1000.0 ok, 1e9 ok, strings/bools/0/neg/1e9+1 → 422), note (≤200 code points, non-string → 422) and visibility (bad → 422) rules per entry; defaults "" and public.
+== S1-192 | §11 | error | -
+> Unknown handle is 404; self-transfer is 422 `self_payment`; malformed batch shape is 422 `validation_failed`.
+== S1-193 | §11 | error | ★
+> Entry errors take precedence in input order, before insufficient funds.
+~ [unaffordable, unknown handle] → 404 not 409; [self, unknown] → 422 self_payment; [unknown, self] → 404; [valid but unaffordable, ..., bad entry last] → the bad-entry error.
+== S1-194 | §11 | behaviour | -
+> Unknown fields are ignored.
+~ Body-level and transfer-level.
+== S1-195 | §11 | behaviour | ★
+> A settlement is affordable when every wallet's balance after all incoming and outgoing transfers is nonnegative.
+~ Net semantics, order-independent: a wallet with 0 that receives 100 and sends 100 in the same batch is fine, even when its outgoing entry is listed first; a circular batch among zero-balance wallets nets to 0 and succeeds; a wallet whose net is -1 fails the whole batch.
+== S1-196 | §11 | error | -
+> Insufficient collective funds gives 409 `insufficient_funds`.
+== S1-197 | §11 | behaviour | ★
+> Either all movements commit together or none do; failed validation claims no idempotency key and creates no payment or revision.
+~ After any failure (404/422/409) no payment exists, balances unchanged, key reusable (201 with a corrected body). Concurrent competing settlements never overdraw.
+== S1-198 | §11 | behaviour | -
+> Return 201 with `settlement_id`, `committed_at` and `payments` in input order.
+== S1-199 | §11 | behaviour | ★
+> Every member is an ordinary payment with `settlement_id` linking the batch; nonmembers expose null for that field.
+~ Ordinary payments from POST /payments and /pay, and seeded ones, carry `settlement_id: null` (key present); members carry the batch's id, also in /activity.
+== S1-200 | §11 | behaviour | ★
+> Members have null request_id and the same server-assigned created_at, equal to committed_at.
+== S1-201 | §11 | behaviour | -
+> Constituents follow ordinary activity-feed visibility. The settlement response contains every member's receipt.
+== S1-202 | §11 | idempotency | ★
+> Replays return 200 with the original complete response.
+~ Identical body incl. committed_at, payment ids; no new payments; replay after balances changed still 200.
+== S1-203 | §11 | idempotency | -
+> This is the fifth idempotent write path in stage 1.
+~ Covered by the §7 matrix.
+== S1-204 | §11 | data-migration | -
+> A reset/import must preserve settlement operator permissions, original payments, requests, settlement membership and retry responses.
+~ After export→reset(other fixture)→import: operator still operator, non-operator still 403, member payments keep settlement_id, settlement replay returns the original 200 body.
+== S1-205 | §11 | concurrency | ★
+> Either all movements commit together or none do
+~ Burst of concurrent settlements and payments competing for the same funds: balances never negative, total constant, successes consistent with what the balances can afford, every committed settlement has all its members.
+== S1-206 | §4 | concurrency | ★
+> Every user has a **handle**: unique across the service
+~ (interaction with S1-087/S1-091) 20 concurrent signups with the same email → exactly one 201, others 409; 20 concurrent signups with different emails deriving the same handle → exactly one 201, others 409 handle_taken.
+== S1-207 | §7 | concurrency | ★
+> The operation takes effect only once.
+~ Interaction row: concurrent identical pay (same key) AND concurrent pay with different keys on one request move money once; pay racing decline/cancel leaves exactly one terminal state whose side effects match every response returned.
+== S1-208 | §1 | behaviour | -
+> everything earlier still holds
+~ Stage 1 is the first stage: there are no earlier ledgers to carry forward.
+! first stage; no earlier rows
